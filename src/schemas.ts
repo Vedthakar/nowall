@@ -100,6 +100,8 @@ export interface Config {
   scope: "repo" | "global";
   /** The user's shell PATH, saved at setup so background takeovers can find agent CLIs. */
   path?: string;
+  /** false after `nowall notch off`: setup won't start it again until `nowall notch on`. */
+  notch?: boolean;
   fallback: {
     enabled: boolean;
     chinaConsent: boolean;

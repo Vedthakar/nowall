@@ -231,7 +231,11 @@ export async function runSetup(argv: string[]): Promise<number> {
   process.stdout.write(
     `\nHooks installed: ${written.map((w) => w.replace(home, "~")).join(", ")}\n`,
   );
-  if (!argv.includes("--no-notch")) process.stdout.write(`${startNotch(home)}\n`);
+  if (config.notch === false) {
+    process.stdout.write("Notch is off (turn it on with: nowall notch on)\n");
+  } else if (!argv.includes("--no-notch")) {
+    process.stdout.write(`${startNotch(home)}\n`);
+  }
 
   const order = config.order.filter((id) => snap.agents.find((a) => a.id === id)?.installed);
   process.stdout.write(

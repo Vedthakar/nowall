@@ -58,7 +58,8 @@ A small black notch on the right edge of your screen, vertically centered. It's 
   - A check: done.
   - A ring around an agent's icon: it's cooling down, and the ring refills as its reset approaches.
 - **Hover:** it grows smoothly leftward into a card with each task's repo, what the agent is doing, a "who built what" bar (e.g. Claude 65% · Cursor 35%), task progress, and every agent's status: ready, not signed in, usage used, or time until its limit resets. Hover an agent icon and it pops out.
-- **Right-click:** refresh, hide for an hour, or quit. `nowall notch` brings it back, and `nowall notch status` diagnoses it.
+- **Right-click:** refresh, hide for an hour, or quit.
+- **Off and on:** `nowall notch off` hides it until you run `nowall notch on` (it stays off across restarts and re-running setup). nowall keeps working either way. `nowall notch status` diagnoses it.
 
 Clicks anywhere outside the notch go straight through to whatever is underneath. Windows and Linux versions are on the [roadmap](docs/ROADMAP.md).
 
@@ -91,7 +92,7 @@ Clicks anywhere outside the notch go straight through to whatever is underneath.
 | `nowall status` | Agents plus the last session and its checkpoints in this repo |
 | `nowall logs [-f]` | What a background takeover did (or is doing) here |
 | `nowall undo [n]` | Roll files back to the end of step *n* (never deletes files) |
-| `nowall notch [stop]` | Start or stop the notch |
+| `nowall notch on` / `off` | Show or hide the notch (off is remembered) |
 | `nowall run claude` | Run terminal Claude under nowall (optional; hooks cover it anyway) |
 | `nowall init` | Per-repo mode instead of `setup` |
 | `nowall uninstall --global` | Remove everything `setup` added |

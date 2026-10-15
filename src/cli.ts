@@ -27,7 +27,7 @@ import {
   startNotch,
   stopNotch,
 } from "./setup.js";
-import { isTrustedRepo, loadConfig, loadState } from "./state.js";
+import { isTrustedRepo, loadConfig, loadState, saveConfig } from "./state.js";
 import { writeSummary } from "./summary.js";
 import { type Deps, failover, fmtTime, runInteractive, startSession } from "./supervisor.js";
 
@@ -44,7 +44,7 @@ Usage:
   nowall demo                 watch a simulated failover (no real agents, no usage)
   nowall logs [-f]            what a background takeover did (or is doing) in this repo
   nowall agents               which agents nowall found, sign-in, cooldowns, usage
-  nowall notch [stop|status]  start, stop or diagnose the macOS notch
+  nowall notch [on|off|status] show or hide the macOS notch (off is remembered)
   nowall note --task "..." [--status done|todo] | --decision "..."
   nowall uninstall [--global]  remove this repo's hooks (or, with --global, everything setup added)
 `;
@@ -371,10 +371,20 @@ async function main(argv: string[]): Promise<number> {
         process.stdout.write(`${notchStatus()}\n`);
         return 0;
       }
-      if (rest[0] === "stop") {
+      if (rest[0] === "stop" || rest[0] === "off") {
         stopNotch();
-        process.stdout.write("Notch stopped.\n");
+        const config = loadConfig();
+        config.notch = false;
+        saveConfig(config);
+        process.stdout.write(
+          "Notch is off. nowall keeps working in the background. Turn it back on with: nowall notch on\n",
+        );
         return 0;
+      }
+      {
+        const config = loadConfig();
+        config.notch = true;
+        saveConfig(config);
       }
       process.stdout.write(`${startNotch()}\n`);
       return 0;
