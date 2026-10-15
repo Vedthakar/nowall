@@ -1,14 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { mergeHooksFile, withHooks } from "./adapters/common.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
+import { shq, writeAtomic } from "./fsafe.js";
 import { excludeLocally, repoRoot } from "./git.js";
 import { AGENT_IDS, type Config } from "./schemas.js";
-import { handoffDir } from "./session.js";
-import { configDir, loadConfig, saveConfig } from "./state.js";
+import { handoffDir, handoffProblem } from "./session.js";
+import { configDir, loadConfig, saveConfig, trustRepo, untrustRepo } from "./state.js";
 
 export const CONSENT = `nowall runs entirely on this machine. No account, no server, no telemetry.
 
@@ -16,10 +17,12 @@ What it does in this repo:
   • Adds hooks for Claude Code / Codex / Cursor that append tiny lines to .handoff/journal.jsonl
     (your prompts, files edited, commands run). Secrets are redacted before anything is written.
   • Asks the agent to log one line per finished task. Cost: roughly 100–300 tokens per session.
-  • Before every handoff, snapshots your files to a git ref (refs/heads/nowall/...). Your branch,
-    index and working tree are never touched. Undo any step with \`nowall undo\`.
+  • Before every handoff, snapshots your files to a hidden git ref (refs/nowall/...). Your branches,
+    index and working tree are never touched, and the refs are never pushed. Undo with \`nowall undo\`.
   • When an agent hits its usage limit, starts the next agent you already have installed and signed
     in, using YOUR account with that agent. nowall never sees, stores or sends your credentials.
+  • If Claude Code hits its limit in the desktop app or an IDE (not under \`nowall run\`), opens a new
+    Terminal window and continues there. Turn off with "takeover": "off" in the config.
   • Headless agents run with edit-only permissions by default; full auto-approve is opt-in.
 
 Files: .handoff/ (git-excluded), .claude/settings.local.json, .codex/hooks.json, .cursor/hooks.json,
@@ -48,8 +51,9 @@ async function ask(question: string): Promise<string> {
 
 function nowallCommand(): { cmd: string; global: boolean } {
   if (resolveBinary("nowall")) return { cmd: "nowall", global: true };
+  // Hooks run through sh: quote paths so spaces, quotes or `$` in them can't inject commands.
   const script = realpathSync(process.argv[1] ?? "");
-  return { cmd: `"${process.execPath}" "${script}"`, global: false };
+  return { cmd: `${shq(process.execPath)} ${shq(script)}`, global: false };
 }
 
 export async function runInit(argv: string[]): Promise<number> {
@@ -57,6 +61,11 @@ export async function runInit(argv: string[]): Promise<number> {
   const root = repoRoot(process.cwd());
   if (!root) {
     process.stderr.write("nowall init: run this inside a git repository (git init first).\n");
+    return 1;
+  }
+  const problem = handoffProblem(root);
+  if (problem) {
+    process.stderr.write(`nowall init: refusing to set up here: ${problem}.\n`);
     return 1;
   }
 
@@ -76,16 +85,20 @@ export async function runInit(argv: string[]): Promise<number> {
       ? await a.detect(defaultRunner, bin)
       : { installed: false, signedIn: false as const };
     let line: string;
-    if (!d.installed) line = `not installed. Install: ${a.installHint}`;
+    if (!d.installed && id === "claude" && existsSync("/Applications/Claude.app")) {
+      line = `desktop app found (no \`claude\` terminal command). Desktop sessions are covered: a limit opens a Terminal and continues. For in-terminal use: ${a.installHint}`;
+    } else if (!d.installed) line = `not installed. Install: ${a.installHint}`;
     else if (d.signedIn === false) line = `installed, not signed in. Run: ${a.loginHint}`;
     else {
       line = `ready${d.signedIn === "unknown" ? " (sign-in not checkable; make sure you're logged in)" : ""}`;
-      if (id !== "qwen") ready += 1;
+      if (id !== "qwen" && id !== "claude") ready += 1;
     }
     process.stdout.write(`  ${a.displayName.padEnd(12)} ${line}\n`);
   }
-  if (ready < 2) {
-    process.stdout.write("\nYou need at least two signed-in agents for failover to help.\n");
+  if (ready < 1) {
+    process.stdout.write(
+      "\nNo agent to fail over to yet. Install and sign in to at least one of Codex, Cursor or Antigravity.\n",
+    );
   }
 
   // Repo setup
@@ -133,6 +146,7 @@ export async function runInit(argv: string[]): Promise<number> {
     }
   }
   saveConfig(config);
+  trustRepo(root);
 
   // Shell alias
   const wantAlias =
@@ -158,12 +172,24 @@ export async function runInit(argv: string[]): Promise<number> {
   return 0;
 }
 
-export function installAlias(file = rcFile()): void {
+/** Edits the real file behind a (possibly symlinked, e.g. dotfile-managed) shell rc file. */
+function rcTarget(file: string): string {
+  try {
+    return realpathSync(file);
+  } catch {
+    return file;
+  }
+}
+
+export function installAlias(rc = rcFile()): void {
   const block = `${MARK_START}\nclaude() { command nowall run claude -- "$@"; }\n${MARK_END}\n`;
+  const file = rcTarget(rc);
   const current = existsSync(file) ? readFileSync(file, "utf8") : "";
-  writeFileSync(
+  const stripped = stripBlock(current);
+  writeAtomic(
     file,
-    `${stripBlock(current)}${current && !current.endsWith("\n") ? "\n" : ""}${block}`,
+    `${stripped}${stripped && !stripped.endsWith("\n") ? "\n" : ""}${block}`,
+    0o644,
   );
 }
 
@@ -173,11 +199,14 @@ export function stripBlock(text: string): string {
 }
 
 export async function runUninstall(): Promise<number> {
-  for (const file of [join(homedir(), ".zshrc"), join(homedir(), ".bashrc")]) {
-    if (existsSync(file)) writeFileSync(file, stripBlock(readFileSync(file, "utf8")));
+  for (const file of [join(homedir(), ".zshrc"), join(homedir(), ".bashrc")].map(rcTarget)) {
+    if (!existsSync(file)) continue;
+    const text = readFileSync(file, "utf8");
+    if (text.includes(MARK_START)) writeAtomic(file, stripBlock(text), 0o644);
   }
   const root = repoRoot(process.cwd());
   if (root) {
+    untrustRepo(root);
     for (const f of [".claude/settings.local.json", ".codex/hooks.json"]) {
       const p = join(root, f);
       if (existsSync(p)) mergeHooksFile(p, (existing) => withHooks(existing, {}));

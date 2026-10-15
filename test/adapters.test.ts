@@ -216,7 +216,9 @@ describe("installHooks", () => {
     expect(after.hooks.StopFailure).toEqual([
       {
         matcher: "rate_limit",
-        hooks: [{ type: "command", command: "nowall hook stop-failure --agent claude" }],
+        hooks: [
+          { type: "command", command: "nowall hook stop-failure --agent claude", timeout: 30 },
+        ],
       },
     ]);
     const nowallGroups = after.hooks.PostToolUse.filter((g: unknown) =>

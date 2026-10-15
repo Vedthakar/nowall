@@ -37,9 +37,7 @@ describe("checkpoints", () => {
     expect(sh(repo, "git", ["status", "--porcelain"])).toBe(before.status);
     expect(sh(repo, "git", ["show", `${cp.commit}:new.ts`])).toContain("export const x");
     expect(sh(repo, "git", ["show", `${cp.commit}:README.md`])).toBe("# changed");
-    expect(listCheckpoints(repo, "s_test").map((c) => c.ref)).toEqual([
-      "refs/heads/nowall/s_test/1",
-    ]);
+    expect(listCheckpoints(repo, "s_test").map((c) => c.ref)).toEqual(["refs/nowall/s_test/1"]);
   });
 
   it("honours .gitignore (never snapshots .env)", () => {

@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import { createInterface } from "node:readline";
 import type { AgentAdapter } from "./adapters/types.js";
+import { readJsonSafe, sanitizeTerminal } from "./fsafe.js";
 import { checkpoint, snapshotTree } from "./git.js";
 import { buildPacket } from "./packet.js";
 import { agentName, continuePrompt, masterPrompt } from "./prompt.js";
@@ -12,6 +13,7 @@ import {
   type Session,
   type StopReason,
   appendJournal,
+  archiveTasks,
   loadSession,
   newSessionId,
   readTasks,
@@ -35,6 +37,7 @@ export interface Deps {
 
 export function startSession(root: string, agent: AgentId, now: Date): Session {
   const sid = newSessionId();
+  archiveTasks(root);
   const base = checkpoint(root, sid, 0, `nowall: session start (${agent})`);
   const session: Session = {
     v: 1,
@@ -88,11 +91,9 @@ export async function runInteractive(
   let limit: LimitSignal | null = null;
   const readSignal = () => {
     if (limit || !existsSync(sigFile)) return;
-    try {
-      limit = JSON.parse(readFileSync(sigFile, "utf8")) as LimitSignal;
-    } catch {
-      return; // half-written; next poll
-    }
+    const sig = readJsonSafe<LimitSignal>(sigFile, 64 * 1024);
+    if (!sig || sig.sid !== session.sid) return; // unreadable or not ours: ignore
+    limit = sig;
     child.kill("SIGTERM");
     setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 3000).unref();
   };
@@ -165,12 +166,12 @@ export async function runHeadlessTurn(
           result.sessionId = ev.id;
           break;
         case "text":
-          deps.out(`${redact(ev.text)}\n`);
+          deps.out(`${sanitizeTerminal(redact(ev.text))}\n`);
           break;
         case "tool":
           deps.out(
             dim(
-              `  · ${ev.name} ${redact((ev.files ?? []).join(" ") || (ev.detail ?? "")).slice(0, 100)}\n`,
+              `  · ${sanitizeTerminal(`${ev.name} ${redact((ev.files ?? []).join(" ") || (ev.detail ?? ""))}`).slice(0, 120)}\n`,
             ),
           );
           break;

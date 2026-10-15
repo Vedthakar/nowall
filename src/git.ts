@@ -50,12 +50,33 @@ export function snapshotTree(root: string): string {
     if (existsSync(real)) copyFileSync(real, index);
     const env = { GIT_INDEX_FILE: index };
     git(root, ["add", "-A", "--", "."], env);
-    git(root, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".handoff"], env);
+    // Never snapshot nowall's own data or secret-looking files, even if the repo forgot to ignore them.
+    git(
+      root,
+      ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".handoff", ...SECRET_GLOBS],
+      env,
+    );
     return git(root, ["write-tree"], env);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+const SECRET_GLOBS = [
+  ":(glob)**/.env",
+  ":(glob)**/.env.*",
+  ":(glob)**/*.pem",
+  ":(glob)**/*.key",
+  ":(glob)**/*.p12",
+  ":(glob)**/*.pfx",
+  ":(glob)**/id_rsa*",
+  ":(glob)**/id_ed25519*",
+  ":(glob)**/.npmrc",
+  ":(glob)**/.netrc",
+];
+
+/** Checkpoints live outside refs/heads so `git push --all` and branch lists never include them. */
+export const CHECKPOINT_PREFIX = "refs/nowall";
 
 export interface Checkpoint {
   ref: string;
@@ -63,21 +84,24 @@ export interface Checkpoint {
   tree: string;
 }
 
-/** Commits a snapshot to refs/heads/nowall/<sid>/<n> without moving HEAD or any branch. */
+/** Commits a snapshot to refs/nowall/<sid>/<n> without moving HEAD or any branch. */
 export function checkpoint(root: string, sid: string, n: number, message: string): Checkpoint {
   const tree = snapshotTree(root);
   const head = headCommit(root);
   const args = ["commit-tree", tree, "-m", message];
   if (head) args.push("-p", head);
   const commit = git(root, args);
-  const ref = `refs/heads/nowall/${sid}/${n}`;
+  const ref = `${CHECKPOINT_PREFIX}/${sid}/${n}`;
   git(root, ["update-ref", ref, commit]);
   return { ref, commit, tree };
 }
 
-/** Restores working-tree files from a checkpoint (after taking a safety checkpoint first). */
+/**
+ * Restores working-tree files from a checkpoint. Overlay mode: files that don't exist in the
+ * checkpoint are left alone (never deleted), so an undo can't destroy unrelated work or secrets.
+ */
 export function restore(root: string, commit: string): void {
-  git(root, ["restore", `--source=${commit}`, "--worktree", "--", "."]);
+  git(root, ["restore", "--overlay", `--source=${commit}`, "--worktree", "--", "."]);
 }
 
 export function listCheckpoints(
@@ -86,15 +110,18 @@ export function listCheckpoints(
 ): { ref: string; commit: string; subject: string }[] {
   const out = tryGit(root, [
     "for-each-ref",
-    "--sort=committerdate",
     "--format=%(refname)%09%(objectname)%09%(subject)",
-    sid ? `refs/heads/nowall/${sid}/` : "refs/heads/nowall/",
+    sid ? `${CHECKPOINT_PREFIX}/${sid}/` : `${CHECKPOINT_PREFIX}/`,
   ]);
   if (!out) return [];
-  return out.split("\n").map((l) => {
-    const [ref = "", commit = "", subject = ""] = l.split("\t");
-    return { ref, commit, subject };
-  });
+  const step = (ref: string) => Number(ref.split("/").pop());
+  return out
+    .split("\n")
+    .map((l) => {
+      const [ref = "", commit = "", subject = ""] = l.split("\t");
+      return { ref, commit, subject };
+    })
+    .sort((a, b) => step(a.ref) - step(b.ref));
 }
 
 export function status(root: string): string {

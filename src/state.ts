@@ -1,6 +1,7 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { readJsonSafe, writeAtomic } from "./fsafe.js";
 import { redactDeep } from "./redact.js";
 import {
   type AgentId,
@@ -16,19 +17,44 @@ export function configDir(): string {
 }
 
 export function readJson<T>(path: string): T | null {
+  return readJsonSafe<T>(path);
+}
+
+/** Atomic, symlink-safe write so a crash never leaves half a file. */
+export function writeJson(path: string, value: unknown): void {
+  writeAtomic(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function realRoot(root: string): string {
   try {
-    return JSON.parse(readFileSync(path, "utf8")) as T;
+    return realpathSync(root);
   } catch {
-    return null;
+    return root;
   }
 }
 
-/** Atomic write (tmp + rename) so a crash never leaves half a file. */
-export function writeJson(path: string, value: unknown): void {
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  renameSync(tmp, path);
+/** Repos the user ran `nowall init` in. Hooks and takeovers only act in these. */
+export function isTrustedRepo(root: string): boolean {
+  const list = readJson<string[]>(join(configDir(), "repos.json"));
+  return Array.isArray(list) && list.includes(realRoot(root));
+}
+
+export function trustRepo(root: string): void {
+  const path = join(configDir(), "repos.json");
+  const list = readJson<string[]>(path);
+  const set = new Set(Array.isArray(list) ? list : []);
+  set.add(realRoot(root));
+  writeJson(path, [...set]);
+}
+
+export function untrustRepo(root: string): void {
+  const path = join(configDir(), "repos.json");
+  const list = readJson<string[]>(path);
+  if (Array.isArray(list))
+    writeJson(
+      path,
+      list.filter((r) => r !== realRoot(root)),
+    );
 }
 
 export function loadState(): State {

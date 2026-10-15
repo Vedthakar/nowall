@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { readTail } from "../fsafe.js";
 import { classifyLimit } from "../limits.js";
 import type { LimitHit } from "../schemas.js";
 import { cmdHook, mergeHooksFile, parseStreamJson, withHooks } from "./common.js";
@@ -45,10 +45,10 @@ export const claude: AgentAdapter = {
     return [
       mergeHooksFile(join(root, ".claude", "settings.local.json"), (existing) =>
         withHooks(existing, {
-          SessionStart: [cmdHook(hook("session-start"))],
-          UserPromptSubmit: [cmdHook(hook("prompt"))],
-          PostToolUse: [cmdHook(hook("post-tool"), "Edit|Write|MultiEdit|NotebookEdit|Bash")],
-          StopFailure: [cmdHook(hook("stop-failure"), "rate_limit")],
+          SessionStart: [cmdHook(hook("session-start"), undefined, 30)],
+          UserPromptSubmit: [cmdHook(hook("prompt"), undefined, 10)],
+          PostToolUse: [cmdHook(hook("post-tool"), "Edit|Write|MultiEdit|NotebookEdit|Bash", 10)],
+          StopFailure: [cmdHook(hook("stop-failure"), "rate_limit", 30)],
         }),
       ),
     ];
@@ -60,12 +60,8 @@ export const claude: AgentAdapter = {
  * calls this because its own payload is not documented to carry the message text.
  */
 export function lastLimitFromTranscript(path: string, now: Date): LimitHit | null {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf8");
-  } catch {
-    return null;
-  }
+  const raw = readTail(path, 1024 * 1024); // transcripts can be huge; the error is at the end
+  if (raw === null) return null;
   const lines = raw.trimEnd().split("\n").slice(-300).reverse();
   for (const l of lines) {
     if (!l.includes('"isApiErrorMessage":true')) continue;

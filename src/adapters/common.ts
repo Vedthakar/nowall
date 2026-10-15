@@ -1,5 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { readJsonSafe, writeAtomic } from "../fsafe.js";
 import type { AgentEvent } from "./types.js";
 
 type Json = Record<string, unknown>;
@@ -93,18 +92,16 @@ export function parseStreamJson(line: string): AgentEvent[] {
 
 /** Merges our hook entries into a JSON settings file, replacing earlier nowall entries. */
 export function mergeHooksFile(path: string, build: (existing: Json) => Json): string {
-  let current: Json = {};
-  try {
-    current = obj(JSON.parse(readFileSync(path, "utf8"))) ?? {};
-  } catch {
-    // missing or invalid: start fresh
-  }
-  mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, `${JSON.stringify(build(current), null, 2)}\n`);
+  // Symlink-safe: a repo can't redirect this write to e.g. ~/.zshrc.
+  const current = obj(readJsonSafe<unknown>(path)) ?? {};
+  writeAtomic(path, `${JSON.stringify(build(current), null, 2)}\n`, 0o644);
   return path;
 }
 
-type HookGroup = { matcher?: string; hooks: { type: "command"; command: string }[] };
+type HookGroup = {
+  matcher?: string;
+  hooks: { type: "command"; command: string; timeout?: number }[];
+};
 
 /** Claude/Codex-style `hooks` object: drop prior nowall groups, add ours. */
 export function withHooks(existing: Json, ours: Record<string, HookGroup[]>): Json {
@@ -121,7 +118,10 @@ export function withHooks(existing: Json, ours: Record<string, HookGroup[]>): Js
   return { ...existing, hooks };
 }
 
-export const cmdHook = (command: string, matcher?: string): HookGroup =>
-  matcher
-    ? { matcher, hooks: [{ type: "command", command }] }
-    : { hooks: [{ type: "command", command }] };
+/** A hook group; `timeout` (seconds) caps how long the agent waits on us. */
+export const cmdHook = (command: string, matcher?: string, timeout?: number): HookGroup => {
+  const hook = timeout
+    ? { type: "command" as const, command, timeout }
+    : { type: "command" as const, command };
+  return matcher ? { matcher, hooks: [hook] } : { hooks: [hook] };
+};

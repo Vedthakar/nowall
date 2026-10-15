@@ -153,11 +153,9 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
     expect(sh(w.repo, "git", ["branch", "--show-current"])).toBe("main");
 
     // Checkpoints exist: start, handoff, end.
-    const refs = sh(w.repo, "git", [
-      "for-each-ref",
-      "--format=%(refname)",
-      "refs/heads/nowall/",
-    ]).split("\n");
+    const refs = sh(w.repo, "git", ["for-each-ref", "--format=%(refname)", "refs/nowall/"]).split(
+      "\n",
+    );
     expect(refs).toHaveLength(3);
 
     // Claude is cooling down until its parsed reset.

@@ -1,6 +1,6 @@
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ADAPTERS } from "./adapters/index.js";
+import { sanitizeTerminal, writeAtomic } from "./fsafe.js";
 import { shortStat } from "./git.js";
 import { agentName } from "./prompt.js";
 import type { Session, StopReason } from "./session.js";
@@ -61,11 +61,11 @@ export function renderSummary(root: string, session: Session): string {
       );
     }
   }
-  return lines.join("\n");
+  return sanitizeTerminal(lines.join("\n"));
 }
 
 export function writeSummary(root: string, session: Session): string {
   const text = renderSummary(root, session);
-  writeFileSync(join(handoffDir(root), `summary-${session.sid}.md`), `${text}\n`);
+  writeAtomic(join(handoffDir(root), `summary-${session.sid}.md`), `${text}\n`);
   return text;
 }
