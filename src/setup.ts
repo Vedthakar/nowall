@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
@@ -69,14 +69,46 @@ async function ask(q: string): Promise<string> {
 const xml = (s: string) =>
   s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-/** Installs (or refreshes) the login item that keeps the notch running, then starts it. */
+/** True while a notch process is running (from launchd or opened directly). */
+export function notchRunning(): boolean {
+  return (
+    spawnSync("pgrep", ["-f", "NowallNotch.app/Contents/MacOS/NowallNotch"], { stdio: "ignore" })
+      .status === 0
+  );
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function waitFor(check: () => boolean, ms: number): boolean {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (check()) return true;
+    sleepSync(200);
+  }
+  return check();
+}
+
+/** A config folder inside the temp dir means a stray NOWALL_HOME (e.g. from tests): never persist that. */
+export function tempHomeProblem(): string | null {
+  const dir = configDir();
+  const tmp = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
+  return tmp.some((t) => dir.startsWith(t))
+    ? `NOWALL_HOME points at a temporary folder (${dir}). Run \`unset NOWALL_HOME\` and try again.`
+    : null;
+}
+
+/** Installs (or refreshes) the login item that keeps the notch running, starts it, and verifies it. */
 export function startNotch(home = homedir()): string {
-  if (process.platform !== "darwin")
+  if (process.platform !== "darwin") {
     return "The notch is macOS-only for now (Windows/Linux are on the roadmap).";
+  }
   const app = notchApp();
   if (!app) return "Notch app not found in this build (it is built on macOS with Xcode tools).";
+  const problem = tempHomeProblem();
+  if (problem) return `Notch not started: ${problem}`;
   const args = [
-    app,
     "--node",
     process.execPath,
     "--cli",
@@ -91,7 +123,7 @@ export function startNotch(home = homedir()): string {
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-${args.map((a) => `    <string>${xml(a)}</string>`).join("\n")}
+${[app, ...args].map((a) => `    <string>${xml(a)}</string>`).join("\n")}
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
@@ -100,14 +132,29 @@ ${args.map((a) => `    <string>${xml(a)}</string>`).join("\n")}
 </plist>
 `;
   writeAtomic(plistPath(home), plist, 0o644);
-  const uid = String(process.getuid?.() ?? "");
-  spawnSync("launchctl", ["bootout", `gui/${uid}/${LABEL}`], { stdio: "ignore" });
-  const r = spawnSync("launchctl", ["bootstrap", `gui/${uid}`, plistPath(home)], {
-    stdio: "ignore",
-  });
-  return r.status === 0
-    ? "Notch is running (top-right of your screen) and starts at login."
-    : "Notch installed; it will appear at your next login.";
+
+  // Restart cleanly. `bootout` is asynchronous: bootstrapping before the old job is gone fails.
+  const domain = `gui/${process.getuid?.() ?? ""}`;
+  const loaded = () =>
+    spawnSync("launchctl", ["print", `${domain}/${LABEL}`], { stdio: "ignore" }).status === 0;
+  spawnSync("launchctl", ["bootout", `${domain}/${LABEL}`], { stdio: "ignore" });
+  waitFor(() => !loaded(), 5000);
+  spawnSync("pkill", ["-f", "NowallNotch.app/Contents/MacOS/NowallNotch"], { stdio: "ignore" });
+  let error = "";
+  for (let attempt = 0; attempt < 3 && !loaded(); attempt++) {
+    const r = spawnSync("launchctl", ["bootstrap", domain, plistPath(home)], { encoding: "utf8" });
+    if (r.status !== 0) error = (r.stderr || r.stdout || "").trim();
+    if (!loaded()) sleepSync(1000);
+  }
+  if (waitFor(notchRunning, 4000)) {
+    return "Notch is running (top-right of your screen, under the menu bar) and starts at login.";
+  }
+  // launchd refused (some terminals can't reach the GUI session): open it directly for now.
+  spawnSync("open", ["-g", join(app, "..", "..", ".."), "--args", ...args], { stdio: "ignore" });
+  if (waitFor(notchRunning, 4000)) {
+    return `Notch is running now. It couldn't be added to login items${error ? ` (${error})` : ""}; run \`nowall notch\` from Terminal.app to fix that.`;
+  }
+  return `The notch failed to start${error ? ` (${error})` : ""}. Run \`nowall notch\` from Terminal.app; if it still fails, run \`nowall notch status\` and share the output.`;
 }
 
 export function stopNotch(home = homedir()): void {
@@ -115,6 +162,26 @@ export function stopNotch(home = homedir()): void {
   const uid = String(process.getuid?.() ?? "");
   spawnSync("launchctl", ["bootout", `gui/${uid}/${LABEL}`], { stdio: "ignore" });
   rmSync(plistPath(home), { force: true });
+  spawnSync("pkill", ["-f", "NowallNotch.app/Contents/MacOS/NowallNotch"], { stdio: "ignore" });
+}
+
+/** `nowall notch status`: what's installed, where it reads from, and whether it's running. */
+export function notchStatus(home = homedir()): string {
+  const lines: string[] = [];
+  lines.push(`App:         ${notchApp() ?? "not in this build"}`);
+  lines.push(`Login item:  ${existsSync(plistPath(home)) ? plistPath(home) : "not installed"}`);
+  if (existsSync(plistPath(home))) {
+    const text = readFileSync(plistPath(home), "utf8");
+    const m = /<string>--home<\/string>\s*<string>([^<]*)<\/string>/.exec(text);
+    lines.push(
+      `Reads from:  ${m?.[1] ?? "?"}${m?.[1] && m[1] !== configDir() ? `  (current config is ${configDir()}: run nowall notch to fix)` : ""}`,
+    );
+  }
+  lines.push(`Running:     ${notchRunning() ? "yes" : "no"}`);
+  lines.push(
+    `Data:        ${existsSync(join(configDir(), "agents.json")) ? "agents.json present" : "no agents.json yet (run nowall setup)"}`,
+  );
+  return lines.join("\n");
 }
 
 function describe(a: AgentInfo): string {
@@ -128,6 +195,11 @@ function describe(a: AgentInfo): string {
 export async function runSetup(argv: string[]): Promise<number> {
   const yes = argv.includes("--yes") || argv.includes("-y");
   const home = homedir();
+  const problem = tempHomeProblem();
+  if (problem && !argv.includes("--no-notch")) {
+    process.stderr.write(`nowall setup: ${problem}\n`);
+    return 1;
+  }
   process.stdout.write(`${GLOBAL_CONSENT}\n\n`);
   if (!yes && (await ask("Turn nowall on? [Y/n] ")) === "n") {
     process.stdout.write("Nothing changed.\n");

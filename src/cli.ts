@@ -18,7 +18,15 @@ import {
   loadSession,
   saveSession,
 } from "./session.js";
-import { runLogs, runSetup, runStatusline, runTeardown, startNotch, stopNotch } from "./setup.js";
+import {
+  notchStatus,
+  runLogs,
+  runSetup,
+  runStatusline,
+  runTeardown,
+  startNotch,
+  stopNotch,
+} from "./setup.js";
 import { isTrustedRepo, loadConfig, loadState } from "./state.js";
 import { writeSummary } from "./summary.js";
 import { type Deps, failover, fmtTime, runInteractive, startSession } from "./supervisor.js";
@@ -36,7 +44,7 @@ Usage:
   nowall demo                 watch a simulated failover (no real agents, no usage)
   nowall logs [-f]            what a background takeover did (or is doing) in this repo
   nowall agents               which agents nowall found, sign-in, cooldowns, usage
-  nowall notch [stop]         start or stop the macOS notch
+  nowall notch [stop|status]  start, stop or diagnose the macOS notch
   nowall note --task "..." [--status done|todo] | --decision "..."
   nowall uninstall [--global]  remove this repo's hooks (or, with --global, everything setup added)
 `;
@@ -359,6 +367,10 @@ async function main(argv: string[]): Promise<number> {
       return runLogs(root, rest.includes("-f") || rest.includes("--follow"));
     }
     case "notch":
+      if (rest[0] === "status") {
+        process.stdout.write(`${notchStatus()}\n`);
+        return 0;
+      }
       if (rest[0] === "stop") {
         stopNotch();
         process.stdout.write("Notch stopped.\n");

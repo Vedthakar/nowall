@@ -369,3 +369,12 @@ describe("journeys: one-command global setup", { timeout: 90_000 }, () => {
     expect(codex.usage[0]).toMatchObject({ label: "5h", usedPct: 61 });
   });
 });
+
+describe("journeys: notch safety", () => {
+  it("setup refuses to save the notch config into a temporary folder (stray NOWALL_HOME)", () => {
+    const s = sandbox();
+    const r = s.nowall(["setup", "--yes"], s.scratch);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("unset NOWALL_HOME");
+  });
+});
