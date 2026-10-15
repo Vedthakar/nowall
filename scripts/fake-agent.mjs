@@ -3,7 +3,7 @@
 // Usage: fake-agent.mjs <agent-name> [agent args...]
 // A turn may also set `auth: "<message>"` to simulate an expired or missing login.
 // Behaviour comes from the JSON plan at $FAKE_PLAN: { "<agent>": [turn, turn, ...] }, where a turn is
-//   { prompt?, files?: {path: content}, notes?: [["--task","x"],...], tasks?: {...}, text?, limit?: "message" }
+//   { prompt?, files?: {path: content}, notes?: [["--task","x"],...], tasks?: {...}, text?, limit?: "message", sleepMs? }
 // Every invocation is logged to $FAKE_PLAN.calls.jsonl so tests can assert on prompts and flags.
 import { execSync, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -112,6 +112,15 @@ if (!headless) {
   const sid = `${name}-session-${n}`;
   out({ type: "system", subtype: "init", session_id: sid });
   doWork();
+  if (turn.sleepMs) {
+    if (turn.text)
+      out({
+        type: "assistant",
+        message: { content: [{ type: "text", text: turn.text }] },
+        session_id: sid,
+      });
+    await new Promise((r) => setTimeout(r, turn.sleepMs));
+  }
   const content = [];
   if (turn.text) content.push({ type: "text", text: turn.text });
   for (const f of Object.keys(turn.files ?? {}))

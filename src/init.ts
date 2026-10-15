@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { mergeHooksFile, withHooks } from "./adapters/common.js";
+import { isOurs, mergeHooksFile, withHooks } from "./adapters/common.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
 import { shq, writeAtomic } from "./fsafe.js";
@@ -71,7 +71,11 @@ export async function runInit(argv: string[]): Promise<number> {
 
   process.stdout.write(`${CONSENT}\n\n`);
   if (!yes && (await ask("Set up nowall in this repo? [y/N] ")) !== "y") {
-    process.stdout.write("Nothing changed.\n");
+    process.stdout.write(
+      process.stdin.isTTY
+        ? "Nothing changed.\n"
+        : "Nothing changed. To confirm without a prompt, run: nowall init --yes\n",
+    );
     return 1;
   }
 
@@ -216,9 +220,7 @@ export async function runUninstall(): Promise<number> {
     if (existsSync(cursor)) {
       mergeHooksFile(cursor, (existing) => {
         const hooks = { ...((existing.hooks as Record<string, unknown[]>) ?? {}) };
-        hooks.afterFileEdit = (hooks.afterFileEdit ?? []).filter(
-          (h) => !JSON.stringify(h).includes("nowall hook"),
-        );
+        hooks.afterFileEdit = (hooks.afterFileEdit ?? []).filter((h) => !isOurs(h));
         return { ...existing, hooks };
       });
     }

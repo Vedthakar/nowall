@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { readTail } from "../fsafe.js";
 import { classifyLimit } from "../limits.js";
 import type { LimitHit } from "../schemas.js";
-import { cmdHook, mergeHooksFile, parseStreamJson, withHooks } from "./common.js";
+import { HOOK_MARK, cmdHook, mergeHooksFile, parseStreamJson, withHooks } from "./common.js";
 import { type AgentAdapter, versionOf } from "./types.js";
 
 export const claude: AgentAdapter = {
@@ -41,7 +41,7 @@ export const claude: AgentAdapter = {
   },
 
   installHooks(root, nowall) {
-    const hook = (name: string) => `${nowall} hook ${name} --agent claude`;
+    const hook = (name: string) => `${HOOK_MARK} ${nowall} hook ${name} --agent claude`;
     return [
       mergeHooksFile(join(root, ".claude", "settings.local.json"), (existing) =>
         withHooks(existing, {

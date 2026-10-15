@@ -103,13 +103,22 @@ type HookGroup = {
   hooks: { type: "command"; command: string; timeout?: number }[];
 };
 
+/** Prefix on every hook command we install (a no-op sh assignment) so we can always find ours. */
+export const HOOK_MARK = "NOWALL_HOOK=1";
+
+/** True for hook entries nowall installed, in any form we have ever written. */
+export function isOurs(entry: unknown): boolean {
+  const text = JSON.stringify(entry);
+  return text.includes(HOOK_MARK) || text.includes("nowall hook");
+}
+
 /** Claude/Codex-style `hooks` object: drop prior nowall groups, add ours. */
 export function withHooks(existing: Json, ours: Record<string, HookGroup[]>): Json {
   const hooks: Record<string, unknown[]> = {};
   const prev = obj(existing.hooks) ?? {};
   for (const [event, groups] of Object.entries(prev)) {
     if (!Array.isArray(groups)) continue;
-    const kept = groups.filter((g) => !JSON.stringify(g).includes("nowall hook"));
+    const kept = groups.filter((g) => !isOurs(g));
     if (kept.length) hooks[event] = kept;
   }
   for (const [event, groups] of Object.entries(ours)) {

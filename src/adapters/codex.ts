@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { classifyLimit } from "../limits.js";
-import { cmdHook, mergeHooksFile, withHooks } from "./common.js";
+import { HOOK_MARK, cmdHook, mergeHooksFile, withHooks } from "./common.js";
 import { type AgentAdapter, type AgentEvent, versionOf } from "./types.js";
 
 type Json = Record<string, unknown>;
@@ -85,7 +85,7 @@ export const codex: AgentAdapter = {
   },
 
   installHooks(root, nowall) {
-    const hook = (name: string) => `${nowall} hook ${name} --agent codex`;
+    const hook = (name: string) => `${HOOK_MARK} ${nowall} hook ${name} --agent codex`;
     return [
       mergeHooksFile(join(root, ".codex", "hooks.json"), (existing) =>
         withHooks(existing, {

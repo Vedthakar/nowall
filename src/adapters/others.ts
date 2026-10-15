@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { classifyLimit } from "../limits.js";
-import { mergeHooksFile, parseStreamJson } from "./common.js";
+import { HOOK_MARK, isOurs, mergeHooksFile, parseStreamJson } from "./common.js";
 import { type AgentAdapter, versionOf } from "./types.js";
 
 /** Generic limit wording for agents whose exact error text has not been captured yet. */
@@ -69,8 +69,8 @@ export const cursor: AgentAdapter = {
       mergeHooksFile(join(root, ".cursor", "hooks.json"), (existing) => {
         const hooks = { ...((existing.hooks as Record<string, unknown[]>) ?? {}) };
         hooks.afterFileEdit = [
-          ...(hooks.afterFileEdit ?? []).filter((h) => !JSON.stringify(h).includes("nowall hook")),
-          { command: `${nowall} hook post-tool --agent cursor` },
+          ...(hooks.afterFileEdit ?? []).filter((h) => !isOurs(h)),
+          { command: `${HOOK_MARK} ${nowall} hook post-tool --agent cursor` },
         ];
         return { version: 1, ...existing, hooks };
       }),
