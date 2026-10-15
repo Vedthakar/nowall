@@ -1,0 +1,11 @@
+#!/bin/sh
+# Block commits that contain secrets. Requires gitleaks (brew install gitleaks).
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks git --pre-commit --staged --redact --no-banner -v || {
+    echo "gitleaks: possible secret in staged changes. Commit blocked." >&2
+    exit 1
+  }
+else
+  echo "gitleaks not installed; refusing to commit. Run: brew install gitleaks" >&2
+  exit 1
+fi

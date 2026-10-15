@@ -1,0 +1,32 @@
+# Dependencies / build
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+auth.json
+credentials*.json
+*.credentials
+oauth_creds.json
+
+# Local / private data
+fixtures/private/
+*.local.*
+.handoff/
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.log
