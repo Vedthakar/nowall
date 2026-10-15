@@ -3,7 +3,7 @@ import { existsSync, rmSync } from "node:fs";
 import { createInterface } from "node:readline";
 import type { AgentAdapter } from "./adapters/types.js";
 import { readJsonSafe, sanitizeTerminal } from "./fsafe.js";
-import { checkpoint, snapshotTree } from "./git.js";
+import { checkpoint, shortStat, snapshotTree } from "./git.js";
 import { isAuthError } from "./limits.js";
 import { buildPacket } from "./packet.js";
 import { agentName, continuePrompt, masterPrompt } from "./prompt.js";
@@ -23,6 +23,7 @@ import {
   signalPath,
 } from "./session.js";
 import { earliestReset, loadState, pickNext, recordLimit, saveState } from "./state.js";
+import { type Phase, describeTool, updateStatus } from "./status.js";
 
 export interface Deps {
   root: string;
@@ -169,6 +170,7 @@ export async function runHeadlessTurn(
   };
   const errorTexts: string[] = [];
   let sawDone = false;
+  let lastStatus = 0;
   let stderr = "";
   child.stderr?.on("data", (d: Buffer) => {
     stderr = (stderr + d.toString()).slice(-8192);
@@ -185,6 +187,14 @@ export async function runHeadlessTurn(
           deps.out(`${sanitizeTerminal(redact(clip(ev.text)))}\n`);
           break;
         case "tool":
+          if (Date.now() - lastStatus > 1000) {
+            lastStatus = Date.now();
+            updateStatus(session.sid, deps.root, {
+              agent: adapter.id,
+              phase: "working",
+              detail: describeTool(ev.name, ev.files?.[0], ev.detail),
+            });
+          }
           deps.out(
             dim(
               `  · ${sanitizeTerminal(`${ev.name} ${redact((ev.files ?? []).join(" ") || (ev.detail ?? ""))}`).slice(0, 120)}\n`,
@@ -300,6 +310,12 @@ export async function failover(
     });
     session.segments.push({ agent: next, mode: "headless", startedAt: deps.now().toISOString() });
     saveSession(deps.root, session);
+    updateStatus(session.sid, deps.root, {
+      agent: next,
+      phase: "working",
+      detail: `Taking over from ${agentName(current)}`,
+      shares: agentShares(deps.root, session),
+    });
     deps.out(dim(`\n── continuing in ${agentName(next)} ──\n`));
 
     const adapter = deps.adapters[next];
@@ -338,6 +354,7 @@ export async function failover(
         saveSession(deps.root, session);
         delete deps.binaries[next];
         deps.out(dim(`  ${notice}. Trying the next agent.\n`));
+        updateStatus(session.sid, deps.root, { agent: next, phase: "handing-off", detail: notice });
         skippedForAuth = true;
         handedOff = true;
         continue;
@@ -368,6 +385,16 @@ export async function failover(
       if (errors >= 2) return finish(deps, session, "error");
 
       const tasks = readTasks(deps.root);
+      if (tasks) {
+        updateStatus(session.sid, deps.root, {
+          agent: next,
+          phase: "working",
+          tasks: {
+            done: tasks.tasks.filter((t) => t.status === "done").length,
+            total: tasks.tasks.length,
+          },
+        });
+      }
       const tree = snapshotTree(deps.root);
       noDiff = tree === lastTree ? noDiff + 1 : 0;
       lastTree = tree;
@@ -406,7 +433,33 @@ function finish(deps: Deps, session: Session, reason: StopReason): StopReason {
   closeSegment(session, reason, cp.commit, null, deps.now());
   session.finished = { at: deps.now().toISOString(), reason };
   saveSession(deps.root, session);
+  const phase: Phase =
+    reason === "complete" ? "done" : reason === "all-limited" ? "paused" : "stopped";
+  const last = session.segments.filter((s) => s.endReason !== "auth").at(-1);
+  updateStatus(session.sid, deps.root, {
+    agent: last?.agent ?? "claude",
+    phase,
+    detail: phase === "done" ? "Task complete" : `Stopped: ${reason}`,
+    shares: agentShares(deps.root, session),
+  });
   return reason;
+}
+
+/** Lines changed per agent, from consecutive checkpoints (for the notch's "who built what" bar). */
+export function agentShares(root: string, session: Session): { agent: AgentId; lines: number }[] {
+  const totals = new Map<AgentId, number>();
+  let from = session.baseCommit;
+  for (const seg of session.segments) {
+    if (!seg.checkpoint) continue;
+    const stat = shortStat(root, from, seg.checkpoint);
+    const lines = [...stat.matchAll(/(\d+) (?:insertion|deletion)/g)].reduce(
+      (n, m) => n + Number(m[1]),
+      0,
+    );
+    totals.set(seg.agent, (totals.get(seg.agent) ?? 0) + lines);
+    from = seg.checkpoint;
+  }
+  return [...totals].map(([agent, lines]) => ({ agent, lines }));
 }
 
 export function fmtTime(iso: string): string {
