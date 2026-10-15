@@ -31,7 +31,7 @@ export function isInitialized(root: string): boolean {
  * Why nowall must not trust this repo's .handoff/, or null if it is safe. A repo that commits
  * .handoff/ (or makes it a symlink) could feed planted "context" to the next agent.
  */
-export function handoffProblem(root: string): string | null {
+export function handoffProblem(root: string, opts: { git?: boolean } = {}): string | null {
   const dir = handoffDir(root);
   try {
     const st = lstatSync(dir);
@@ -40,6 +40,7 @@ export function handoffProblem(root: string): string | null {
   } catch {
     return null; // absent: fine
   }
+  if (opts.git === false) return null; // hot path: skip the git query
   try {
     const tracked = execFileSync("git", ["ls-files", "--", ".handoff"], {
       cwd: root,

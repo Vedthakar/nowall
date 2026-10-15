@@ -3,7 +3,7 @@ import { chmodSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { lastLimitFromTranscript } from "./adapters/claude.js";
 import { shq, writeAtomic } from "./fsafe.js";
-import { checkpoint, repoRoot } from "./git.js";
+import { checkpoint, findRepoRoot, repoRoot } from "./git.js";
 import { JOURNAL_RULE } from "./prompt.js";
 import type { AgentId, LimitHit } from "./schemas.js";
 import {
@@ -32,11 +32,14 @@ type Json = Record<string, unknown>;
 const EDIT_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit|apply_patch|edit|write_file|replace)$/i;
 const SHELL_TOOLS = /^(Bash|shell|exec_command|run_shell_command|local_shell)$/i;
 
-/** Root of a repo nowall may act in: initialized by this user, and .handoff/ is trustworthy. */
-export function trustedRoot(cwd: string): string | null {
-  const root = repoRoot(cwd);
-  if (!root || !isInitialized(root) || !isTrustedRepo(root) || handoffProblem(root)) return null;
-  return root;
+/**
+ * Root of a repo nowall may act in: initialized by this user, and .handoff/ is trustworthy.
+ * `deep` also asks git whether .handoff/ is committed (slower; used where it matters).
+ */
+export function trustedRoot(cwd: string, deep = true): string | null {
+  const root = deep ? repoRoot(cwd) : findRepoRoot(cwd);
+  if (!root || !isInitialized(root) || !isTrustedRepo(root)) return null;
+  return handoffProblem(root, { git: deep }) ? null : root;
 }
 
 /**
@@ -55,8 +58,9 @@ export function hookSid(input: Json, env: NodeJS.ProcessEnv, fallback?: string):
 export function ensureExternalSession(root: string, sid: string, agent: AgentId, now: Date): void {
   if (loadSession(root)?.sid === sid) return;
   if (isLocked(root)) return; // a supervised run owns session.json right now
-  archiveTasks(root);
   const base = checkpoint(root, sid, 0, `nowall: session start (${agent})`);
+  if (loadSession(root)?.sid === sid || isLocked(root)) return; // another process got there first
+  archiveTasks(root);
   saveSession(root, {
     v: 1,
     sid,
@@ -77,19 +81,26 @@ export function handleHook(
   input: Json,
   env: NodeJS.ProcessEnv,
   now: Date,
+  background: (hook: string, input: Json) => void = runInBackground,
 ): string {
   const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
-  const root = trustedRoot(cwd);
+  // Prompt/edit hooks run on every tool call: no git process on that path.
+  const root = trustedRoot(cwd, !(name === "prompt" || name === "post-tool"));
   if (!root) return "";
   const sid = hookSid(input, env, loadSession(root)?.sid);
   const rel = (p: string) => (isAbsolute(p) ? relative(root, realish(p)) : p);
 
   switch (name) {
     case "session-start":
-      if (!env.NOWALL_SID) ensureExternalSession(root, sid, agent, now);
+      // The base snapshot can take seconds in a big repo; never make the agent wait for it.
+      if (!env.NOWALL_SID) background("base-snapshot", { cwd: root, session_id: sid.slice(2) });
       return JSON.stringify({
         hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: JOURNAL_RULE },
       });
+
+    case "base-snapshot":
+      ensureExternalSession(root, sid, agent, now);
+      return "";
 
     case "prompt": {
       const prompt = typeof input.prompt === "string" ? input.prompt : "";
@@ -181,6 +192,20 @@ export function launchTakeover(
   chmodSync(script, 0o700);
   open(script);
   return script;
+}
+
+/** Runs `nowall hook <name>` detached, so the agent's hook returns immediately. */
+function runInBackground(hook: string, input: Json): void {
+  const child = spawn(
+    process.execPath,
+    [realpathSync(process.argv[1] ?? ""), "hook", hook, "--agent", "claude"],
+    {
+      detached: true,
+      stdio: ["pipe", "ignore", "ignore"],
+    },
+  );
+  child.stdin?.end(JSON.stringify(input));
+  child.unref();
 }
 
 /** realpath that also works for files that don't exist yet (resolves the nearest existing parent). */

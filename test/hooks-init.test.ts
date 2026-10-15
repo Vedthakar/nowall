@@ -189,7 +189,14 @@ describe("desktop takeover", () => {
   it("starts a session at SessionStart and opens a safely quoted takeover script on a limit", () => {
     const repo = initRepo();
     saveConfig({ ...DEFAULT_CONFIG, takeover: "terminal" });
-    handleHook("session-start", "claude", { cwd: repo, session_id: "abc-123" }, {}, NOW);
+    handleHook(
+      "session-start",
+      "claude",
+      { cwd: repo, session_id: "abc-123" },
+      {},
+      NOW,
+      (hook, input) => handleHook(hook, "claude", input, {}, NOW),
+    );
     expect(loadSession(repo)?.sid).toBe("c_abc-123");
 
     let opened = "";

@@ -6,10 +6,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
@@ -33,6 +34,25 @@ export function repoRoot(cwd: string): string | null {
   return tryGit(cwd, ["rev-parse", "--show-toplevel"]);
 }
 
+/**
+ * Same answer as `git rev-parse --show-toplevel` for normal repos and worktrees, without spawning
+ * git (which costs 80-170 ms per call on some Macs). Used on the hot hook path.
+ */
+export function findRepoRoot(cwd: string): string | null {
+  let dir: string;
+  try {
+    dir = realpathSync(cwd);
+  } catch {
+    return null;
+  }
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
 export function headCommit(root: string): string | null {
   return tryGit(root, ["rev-parse", "--verify", "-q", "HEAD"]);
 }
@@ -46,8 +66,11 @@ export function snapshotTree(root: string): string {
   const index = join(dir, "index");
   try {
     const gitDir = git(root, ["rev-parse", "--absolute-git-dir"]);
+    // Reuse our own index from the last snapshot (warm stat cache), else seed from the user's.
+    const ours = join(gitDir, "nowall-index");
     const real = join(gitDir, "index");
-    if (existsSync(real)) copyFileSync(real, index);
+    if (existsSync(ours)) copyFileSync(ours, index);
+    else if (existsSync(real)) copyFileSync(real, index);
     const env = { GIT_INDEX_FILE: index };
     git(root, ["add", "-A", "--", "."], env);
     // Never snapshot nowall's own data or secret-looking files, even if the repo forgot to ignore them.
@@ -56,7 +79,9 @@ export function snapshotTree(root: string): string {
       ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".handoff", ...SECRET_GLOBS],
       env,
     );
-    return git(root, ["write-tree"], env);
+    const tree = git(root, ["write-tree"], env);
+    copyFileSync(index, ours);
+    return tree;
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
