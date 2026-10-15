@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { chmodSync, realpathSync } from "node:fs";
+import { constants, chmodSync, closeSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 import { lastLimitFromTranscript } from "./adapters/claude.js";
 import { shq, writeAtomic } from "./fsafe.js";
-import { checkpoint, findRepoRoot, repoRoot } from "./git.js";
+import { checkpoint, excludeLocally, findRepoRoot, repoRoot } from "./git.js";
 import { JOURNAL_RULE } from "./prompt.js";
 import type { AgentId, LimitHit } from "./schemas.js";
 import {
@@ -27,19 +28,33 @@ import {
   saveState,
   writeJson,
 } from "./state.js";
+import { describeTool, updateStatus } from "./status.js";
 
 type Json = Record<string, unknown>;
 const EDIT_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit|apply_patch|edit|write_file|replace)$/i;
 const SHELL_TOOLS = /^(Bash|shell|exec_command|run_shell_command|local_shell)$/i;
 
 /**
- * Root of a repo nowall may act in: initialized by this user, and .handoff/ is trustworthy.
- * `deep` also asks git whether .handoff/ is committed (slower; used where it matters).
+ * Root of a repo nowall may act in, or null. With `nowall setup` (global scope) that is any git
+ * repo, set up on first use; otherwise only repos the user ran `nowall init` in. Either way a repo
+ * that commits or symlinks .handoff/ is refused. `deep` also asks git about committed files.
  */
 export function trustedRoot(cwd: string, deep = true): string | null {
   const root = deep ? repoRoot(cwd) : findRepoRoot(cwd);
-  if (!root || !isInitialized(root) || !isTrustedRepo(root)) return null;
-  return handoffProblem(root, { git: deep }) ? null : root;
+  if (!root) return null;
+  if (handoffProblem(root, { git: deep })) return null;
+  if (loadConfig().scope === "global") {
+    if (!isInitialized(root)) {
+      try {
+        mkdirSync(handoffDir(root), { recursive: true });
+        excludeLocally(root, ".handoff/");
+      } catch {
+        return null;
+      }
+    }
+    return root;
+  }
+  return isInitialized(root) && isTrustedRepo(root) ? root : null;
 }
 
 /**
@@ -71,6 +86,8 @@ export function ensureExternalSession(root: string, sid: string, agent: AgentId,
   });
 }
 
+const HOT = new Set(["prompt", "post-tool", "notification", "stop", "session-end"]);
+
 /**
  * Handles `nowall hook <name>` invoked by an agent's hook system. Must never throw and must
  * print nothing unless the event uses stdout (SessionStart context). Returns stdout text.
@@ -83,17 +100,19 @@ export function handleHook(
   now: Date,
 ): string {
   const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
-  // Prompt/edit hooks run on every tool call: no git process on that path.
-  const root = trustedRoot(cwd, !(name === "prompt" || name === "post-tool"));
+  // Frequent hooks run on every tool call or turn: no git process on that path.
+  const root = trustedRoot(cwd, !HOT.has(name));
   if (!root) return "";
   const sid = hookSid(input, env, loadSession(root)?.sid);
   const rel = (p: string) => (isAbsolute(p) ? relative(root, realish(p)) : p);
+  const status = (patch: Parameters<typeof updateStatus>[2]) => updateStatus(sid, root, patch, now);
 
   switch (name) {
     case "session-start":
       // Synchronous on purpose: the base must predate the agent's first edit, or that work would
-      // look like it was already there. Fast thanks to the persistent snapshot index (warmed by init).
+      // look like it was already there. Fast thanks to the persistent snapshot index.
       if (!env.NOWALL_SID) ensureExternalSession(root, sid, agent, now);
+      status({ agent, phase: "idle", detail: "Session started" });
       return JSON.stringify({
         hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: JOURNAL_RULE },
       });
@@ -102,6 +121,7 @@ export function handleHook(
       const prompt = typeof input.prompt === "string" ? input.prompt : "";
       if (prompt.trim() && !prompt.trim().startsWith("/")) {
         appendJournal(root, { sid, agent, kind: "goal", text: prompt });
+        status({ agent, phase: "working", detail: prompt });
       }
       return "";
     }
@@ -113,20 +133,32 @@ export function handleHook(
         (v): v is string => typeof v === "string",
       );
       if (EDIT_TOOLS.test(tool) || (file && !SHELL_TOOLS.test(tool))) {
-        appendJournal(root, {
-          sid,
-          agent,
-          kind: "edit",
-          text: tool,
-          files: file ? [rel(file)] : [],
-        });
+        const f = file ? rel(file) : undefined;
+        appendJournal(root, { sid, agent, kind: "edit", text: tool, files: f ? [f] : [] });
+        status({ agent, phase: "working", detail: describeTool(tool, f) });
       } else if (SHELL_TOOLS.test(tool)) {
         const cmd = ti.command;
         const text = Array.isArray(cmd) ? cmd.join(" ") : String(cmd ?? "");
         if (text) appendJournal(root, { sid, agent, kind: "cmd", text: text.slice(0, 120) });
+        status({ agent, phase: "working", detail: describeTool(tool, undefined, text) });
       }
       return "";
     }
+
+    case "notification": {
+      // Claude asks for permission or is waiting on the user.
+      const message = typeof input.message === "string" ? input.message : "Needs your input";
+      status({ agent, phase: "needs-input", detail: message });
+      return "";
+    }
+
+    case "stop":
+      status({ agent, phase: "your-turn", detail: "Finished its turn" });
+      return "";
+
+    case "session-end":
+      status({ agent, phase: "ended", detail: "Session closed" });
+      return "";
 
     case "stop-failure": {
       const transcript = typeof input.transcript_path === "string" ? input.transcript_path : "";
@@ -137,6 +169,7 @@ export function handleHook(
       };
       saveState(recordLimit(loadState(), agent, hit, now, loadConfig().defaultCooldownMinutes));
       appendJournal(root, { sid, agent, kind: "limit", text: hit.message });
+      status({ agent, phase: "handing-off", detail: hit.message });
 
       if (env.NOWALL_SID) {
         // Supervised by `nowall run`: tell the wrapper, which stops the agent and hands off.
@@ -160,10 +193,15 @@ export function handleHook(
   }
 }
 
+function takeoverArgs(cli: string, sid: string, agent: AgentId): string[] {
+  return [cli, "takeover", "--sid", sid, "--from", agent];
+}
+
 /**
- * Opens a new Terminal window running `nowall takeover` (macOS). The script quotes every value
- * with shq(), so repo paths containing quotes, `$` or spaces cannot inject commands.
- * NOWALL_TAKEOVER=inline runs it detached in the background instead (tests, Linux, headless).
+ * Continues a session nowall didn't launch (e.g. Claude desktop app). By default it runs silently
+ * in the background, logging to .handoff/takeover.log, and the notch shows progress. With
+ * `"takeover": "terminal"` it opens a Terminal window instead (macOS). Every value in the Terminal
+ * script is passed as a quoted env var, so paths or ids can never inject shell commands.
  */
 export function launchTakeover(
   root: string,
@@ -173,22 +211,35 @@ export function launchTakeover(
   open: (script: string) => void = (script) =>
     spawn("open", ["-a", "Terminal", script], { detached: true, stdio: "ignore" }).unref(),
 ): string | null {
-  const cli = realpathSync(process.argv[1] ?? "");
-  const args = [cli, "takeover", "--sid", sid, "--from", agent];
-  if (env.NOWALL_TAKEOVER === "inline" || process.platform !== "darwin") {
-    spawn(process.execPath, args, { cwd: root, detached: true, stdio: "ignore", env }).unref();
+  // Our own CLI, next to this module (never trust argv[1]: a test runner or wrapper may own it).
+  const cli = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
+  const config = loadConfig();
+  // Agent CLIs usually live on the user's shell PATH, which GUI apps (and their hooks) don't get.
+  const path = [config.path, env.PATH].filter(Boolean).join(":");
+
+  if (config.takeover !== "terminal" || process.platform !== "darwin") {
+    const log = join(handoffDir(root), "takeover.log");
+    const fd = openSync(log, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
+    try {
+      spawn(process.execPath, takeoverArgs(cli, sid, agent), {
+        cwd: root,
+        detached: true,
+        stdio: ["ignore", fd, fd],
+        env: { ...env, PATH: path },
+      }).unref();
+    } finally {
+      closeSync(fd);
+    }
     return null;
   }
+
   const script = join(handoffDir(root), `takeover-${sid}.command`);
-  // Values travel as quoted env vars; the shell command itself is a constant string, so nothing in
-  // a path or id can inject commands. Running via the login shell picks up the user's own PATH
-  // (where agent CLIs usually live); the hook's PATH is prepended in case it knows more.
   const vars: Record<string, string> = {
     NOWALL_NODE: process.execPath,
     NOWALL_CLI: cli,
     NOWALL_TAKEOVER_SID: sid,
     NOWALL_TAKEOVER_FROM: agent,
-    NOWALL_EXTRA_PATH: env.PATH ?? "",
+    NOWALL_EXTRA_PATH: path,
   };
   if (env.NOWALL_HOME) vars.NOWALL_HOME = env.NOWALL_HOME;
   const exports = Object.entries(vars)

@@ -210,6 +210,7 @@ describe("desktop takeover", () => {
     mkdirSync(evil);
     sh(evil, "git", ["init", "-q"]);
     mkdirSync(join(evil, ".handoff"));
+    saveConfig({ ...DEFAULT_CONFIG, takeover: "terminal" });
     const script = launchTakeover(evil, "c_x", "claude", {}, () => {}) as string;
     // Run only the `cd` line to prove the path survives quoting intact and nothing executes.
     const cdLine = readFileSync(script, "utf8").split("\n")[1] as string;

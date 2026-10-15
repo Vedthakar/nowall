@@ -320,7 +320,6 @@ describe("end-to-end: resilience and other journeys", { timeout: 90_000 }, () =>
       },
       { order: ["claude", "cursor"] },
     );
-    w.env.NOWALL_TAKEOVER = "inline";
     // Launch "Claude" directly, the way the desktop app would, not through nowall.
     const claude = spawn(join(dirname(w.plan), "bin", "claude"), [], {
       cwd: w.repo,

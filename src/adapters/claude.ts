@@ -49,6 +49,9 @@ export const claude: AgentAdapter = {
           UserPromptSubmit: [cmdHook(hook("prompt"), undefined, 10)],
           PostToolUse: [cmdHook(hook("post-tool"), "Edit|Write|MultiEdit|NotebookEdit|Bash", 10)],
           StopFailure: [cmdHook(hook("stop-failure"), "rate_limit", 30)],
+          Notification: [cmdHook(hook("notification"), undefined, 10)],
+          Stop: [cmdHook(hook("stop"), undefined, 10)],
+          SessionEnd: [cmdHook(hook("session-end"), undefined, 10)],
         }),
       ),
     ];

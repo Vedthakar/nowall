@@ -91,8 +91,15 @@ export interface Config {
   yolo: boolean;
   stop: { maxTurns: number; maxMinutes: number; noDiffTurns: number };
   defaultCooldownMinutes: number;
-  /** When an agent nowall didn't launch (e.g. Claude desktop app) hits its limit: open a Terminal and continue, or do nothing. */
-  takeover: "terminal" | "off";
+  /**
+   * When an agent nowall didn't launch (e.g. Claude desktop app) hits its limit: continue silently
+   * in the background (default), in a new Terminal window, or not at all.
+   */
+  takeover: "background" | "terminal" | "off";
+  /** "global" (via `nowall setup`): every git repo is covered. "repo": only repos that ran `nowall init`. */
+  scope: "repo" | "global";
+  /** The user's shell PATH, saved at setup so background takeovers can find agent CLIs. */
+  path?: string;
   fallback: {
     enabled: boolean;
     chinaConsent: boolean;
@@ -107,7 +114,8 @@ export const DEFAULT_CONFIG: Config = {
   yolo: false,
   stop: { maxTurns: 30, maxMinutes: 120, noDiffTurns: 3 },
   defaultCooldownMinutes: 300,
-  takeover: "terminal",
+  takeover: "background",
+  scope: "repo",
   fallback: { enabled: false, chinaConsent: false },
 };
 
