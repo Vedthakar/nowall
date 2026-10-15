@@ -113,7 +113,7 @@ exec "${process.execPath}" "${fake}" ${agent} "$@"
   });
 
   say(
-    "\n3. That summary is the only thing you'd see. Try it for real: `nowall init` in your project.",
+    "\n3. That summary (and the notch) is all you would see. Turn it on for real with: nowall setup",
   );
   rmSync(scratch, { recursive: true, force: true });
   return r.status ?? 1;
