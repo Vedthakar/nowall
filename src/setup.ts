@@ -147,7 +147,7 @@ ${[app, ...args].map((a) => `    <string>${xml(a)}</string>`).join("\n")}
     if (!loaded()) sleepSync(1000);
   }
   if (waitFor(notchRunning, 4000)) {
-    return "Notch is running (top-right of your screen, under the menu bar) and starts at login.";
+    return "Notch is running (right edge of your screen, middle) and starts at login.";
   }
   // launchd refused (some terminals can't reach the GUI session): open it directly for now.
   spawnSync("open", ["-g", join(app, "..", "..", ".."), "--args", ...args], { stdio: "ignore" });

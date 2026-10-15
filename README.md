@@ -49,18 +49,18 @@ This runs a full simulated failover in a throwaway repo: Claude hits its limit, 
 
 ## The notch (macOS)
 
-A black pill under the menu bar, top-right.
+A small black notch on the right edge of your screen, vertically centered. It's shaped like the MacBook notch turned on its side.
 
-- **Collapsed:** agent icons and what's happening right now.
+- **Collapsed:** a slim tab with what's happening on top, then one icon per agent.
   - Bouncing dots: an agent is working.
   - A wiggling bubble: an agent needs your input.
   - A spinning swap: switching agents.
   - A check: done.
   - A ring around an agent's icon: it's cooling down, and the ring refills as its reset approaches.
-- **Hover:** it expands to show each task's repo, what the agent is doing, a "who built what" bar (e.g. Claude 65% · Cursor 35%), task progress, and every agent's status: ready, not signed in, usage used (where the agent exposes it), or time until its limit resets. Hover an agent icon and it pops out with its details.
-- **Right-click:** refresh, hide for an hour, or quit. `nowall notch` brings it back.
+- **Hover:** it grows smoothly leftward into a card with each task's repo, what the agent is doing, a "who built what" bar (e.g. Claude 65% · Cursor 35%), task progress, and every agent's status: ready, not signed in, usage used, or time until its limit resets. Hover an agent icon and it pops out.
+- **Right-click:** refresh, hide for an hour, or quit. `nowall notch` brings it back, and `nowall notch status` diagnoses it.
 
-Windows and Linux notch apps are on the [roadmap](docs/ROADMAP.md). Everything else works on Linux today.
+Clicks anywhere outside the notch go straight through to whatever is underneath. Windows and Linux versions are on the [roadmap](docs/ROADMAP.md).
 
 ## How it works
 

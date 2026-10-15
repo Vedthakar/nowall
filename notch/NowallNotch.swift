@@ -78,6 +78,9 @@ final class Store: ObservableObject {
     @Published var agents: [AgentInfo] = []
     @Published var sessions: [SessionStatus] = []
     @Published var now = Date()
+    @Published var expanded = false
+    /// Where the visible shape is inside the window (SwiftUI coordinates), for hover tracking.
+    var shapeRect: CGRect = .zero
 
     let home: URL
     let node: String?
@@ -315,25 +318,49 @@ struct SharesBar: View {
 
 // MARK: - Views
 
-struct PillView: View {
+/// Collapsed: a slim vertical tab. What's happening on top, then one icon per agent.
+struct TabContent: View {
     @ObservedObject var store: Store
     var body: some View {
         let s = store.primary
-        let current = s?.agent
-        HStack(spacing: 8) {
-            PhaseGlyph(phase: s?.phase ?? "idle", color: brand(current ?? "claude").color)
-            HStack(spacing: 5) {
-                ForEach(store.agents) { a in
-                    AgentIcon(agent: a, active: a.id == current && s?.phase == "working", now: store.now, size: 20)
-                }
+        VStack(spacing: 9) {
+            PhaseGlyph(phase: s?.phase ?? "idle", color: brand(s?.agent ?? "claude").color)
+            ForEach(store.agents) { a in
+                AgentIcon(agent: a, active: a.id == s?.agent && s?.phase == "working", now: store.now, size: 22)
             }
             if let t = s?.tasks, t.total > 0 {
-                Text("\(t.done)/\(t.total)").font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundColor(.white.opacity(0.75))
+                Text("\(t.done)/\(t.total)").font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundColor(.white.opacity(0.7))
             }
         }
-        .padding(.horizontal, 11)
-        .frame(height: 30)
+        .frame(width: 26)
+    }
+}
+
+/// Expanded: the detail card.
+struct CardContent: View {
+    @ObservedObject var store: Store
+    var body: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 6) {
+                Text("nowall").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.white.opacity(0.45))
+                Spacer()
+                ForEach(store.agents) { a in
+                    AgentIcon(agent: a, active: a.id == store.primary?.agent && store.primary?.phase == "working",
+                              now: store.now, size: 20)
+                }
+            }
+            if store.sessions.isEmpty {
+                Text("All quiet. nowall is watching your agents.")
+                    .font(.system(size: 10.5)).foregroundColor(.white.opacity(0.55))
+            }
+            ForEach(store.sessions.prefix(3)) { s in SessionRow(s: s, now: store.now) }
+            if !store.agents.isEmpty {
+                Rectangle().fill(Color.white.opacity(0.12)).frame(height: 1)
+                ForEach(store.agents) { a in AgentRow(a: a, now: store.now) }
+            }
+        }
+        .frame(width: 280, alignment: .leading)
     }
 }
 
@@ -417,59 +444,73 @@ struct AgentRow: View {
     }
 }
 
-struct RootView: View {
-    @ObservedObject var store: Store
-    @State private var expanded: Bool
-    var onSize: (CGSize) -> Void
-
-    init(store: Store, expanded: Bool = false, onSize: @escaping (CGSize) -> Void) {
-        self.store = store
-        _expanded = State(initialValue: expanded)
-        self.onSize = onSize
+/// Notch-style shape hanging off the right screen edge: rounded on the inside, with concave
+/// fillets where it meets the edge (the MacBook notch, turned on its side).
+struct EdgeNotch: Shape {
+    var radius: CGFloat
+    var fillet: CGFloat
+    var animatableData: AnimatablePair<CGFloat, CGFloat> {
+        get { AnimatablePair(radius, fillet) }
+        set { radius = newValue.first; fillet = newValue.second }
     }
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 0) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack { Spacer(minLength: 0); PillView(store: store) }
-                if expanded {
-                    if store.sessions.isEmpty {
-                        Text("All quiet. nowall is watching your agents.")
-                            .font(.system(size: 10.5)).foregroundColor(.white.opacity(0.55))
-                    }
-                    ForEach(store.sessions.prefix(3)) { s in SessionRow(s: s, now: store.now) }
-                    if !store.agents.isEmpty {
-                        Divider().background(Color.white.opacity(0.15))
-                        ForEach(store.agents) { a in AgentRow(a: a, now: store.now) }
-                    }
-                }
-            }
-            .padding(.bottom, expanded ? 12 : 0)
-            .padding(.horizontal, expanded ? 12 : 0)
-            .frame(width: expanded ? 320 : nil)
-            .background(
-                RoundedRectangle(cornerRadius: expanded ? 18 : 15, style: .continuous).fill(Color.black)
-                    .overlay(RoundedRectangle(cornerRadius: expanded ? 18 : 15, style: .continuous)
-                        .stroke(Color.white.opacity(0.09), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.35), radius: 10, y: 4)
-            )
-            .onHover { h in withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) { expanded = h } }
-            .contextMenu {
-                Button("Refresh agents") { store.refreshAgents() }
-                Button("Hide for 1 hour") { AppDelegate.shared?.hide(for: 3600) }
-                Divider()
-                Button("Quit nowall notch") { NSApp.terminate(nil) }
-            }
-            .background(GeometryReader { g in Color.clear.preference(key: SizeKey.self, value: g.size) })
-        }
-        .padding(8)
-        .fixedSize()
-        .onPreferenceChange(SizeKey.self) { onSize(CGSize(width: $0.width + 16, height: $0.height + 16)) }
+    func path(in r: CGRect) -> Path {
+        let f = min(fillet, r.height / 4)
+        let c = min(radius, (r.height - 2 * f) / 2, r.width - f)
+        var p = Path()
+        p.move(to: CGPoint(x: r.maxX, y: r.minY))
+        p.addQuadCurve(to: CGPoint(x: r.maxX - f, y: r.minY + f), control: CGPoint(x: r.maxX, y: r.minY + f))
+        p.addLine(to: CGPoint(x: r.minX + c, y: r.minY + f))
+        p.addQuadCurve(to: CGPoint(x: r.minX, y: r.minY + f + c), control: CGPoint(x: r.minX, y: r.minY + f))
+        p.addLine(to: CGPoint(x: r.minX, y: r.maxY - f - c))
+        p.addQuadCurve(to: CGPoint(x: r.minX + c, y: r.maxY - f), control: CGPoint(x: r.minX, y: r.maxY - f))
+        p.addLine(to: CGPoint(x: r.maxX - f, y: r.maxY - f))
+        p.addQuadCurve(to: CGPoint(x: r.maxX, y: r.maxY), control: CGPoint(x: r.maxX, y: r.maxY - f))
+        p.closeSubpath()
+        return p
     }
 }
 
-struct SizeKey: PreferenceKey {
-    static var defaultValue: CGSize = .zero
-    static func reduce(value: inout CGSize, nextValue: () -> CGSize) { value = nextValue() }
+let fillet: CGFloat = 10
+let windowSize = CGSize(width: 340, height: 600)
+
+struct RootView: View {
+    @ObservedObject var store: Store
+    var body: some View {
+        let open = store.expanded
+        ZStack(alignment: .leading) {
+            if open {
+                CardContent(store: store).transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .trailing)))
+            } else {
+                TabContent(store: store).transition(.opacity)
+            }
+        }
+        .padding(.leading, open ? 16 : 7)
+        .padding(.trailing, open ? 14 : 5)
+        .padding(.vertical, fillet + (open ? 14 : 10))
+        .background(
+            EdgeNotch(radius: open ? 22 : 13, fillet: fillet)
+                .fill(Color.black)
+                .shadow(color: .black.opacity(0.3), radius: 8, x: -2)
+        )
+        .background(GeometryReader { g in
+            Color.clear.preference(key: RectKey.self, value: g.frame(in: .named("window")))
+        })
+        .contextMenu {
+            Button("Refresh agents") { store.refreshAgents() }
+            Button("Hide for 1 hour") { AppDelegate.shared?.hide(for: 3600) }
+            Divider()
+            Button("Quit nowall notch") { NSApp.terminate(nil) }
+        }
+        .animation(.spring(response: 0.36, dampingFraction: 0.82), value: open)
+        .frame(width: windowSize.width, height: windowSize.height, alignment: .trailing)
+        .coordinateSpace(name: "window")
+        .onPreferenceChange(RectKey.self) { store.shapeRect = $0 }
+    }
+}
+
+struct RectKey: PreferenceKey {
+    static var defaultValue: CGRect = .zero
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
 }
 
 // MARK: - Window
@@ -483,6 +524,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     static weak var shared: AppDelegate?
     var panel: NotchPanel!
     var store: Store!
+    private var mouseTimer: Timer?
+    private var outsideSince: Date?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         AppDelegate.shared = self
@@ -495,7 +538,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ?? (NSHomeDirectory() as NSString).appendingPathComponent(".config/nowall")
         store = Store(home: URL(fileURLWithPath: homePath), node: arg("--node"), cli: arg("--cli"))
 
-        panel = NotchPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 46),
+        // One fixed-size, transparent window. It never resizes (resizing under the mouse is what
+        // made the old pill jump); the shape animates inside it, and clicks outside it pass through.
+        panel = NotchPanel(contentRect: NSRect(origin: .zero, size: windowSize),
                            styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.isOpaque = false
         panel.backgroundColor = .clear
@@ -504,23 +549,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary, .ignoresCycle]
         panel.isMovable = false
         panel.hidesOnDeactivate = false
-        let root = RootView(store: store) { [weak self] size in self?.resize(to: size) }
-        panel.contentView = NSHostingView(rootView: root)
-        resize(to: CGSize(width: 200, height: 46))
+        panel.ignoresMouseEvents = true
+        panel.contentView = NSHostingView(rootView: RootView(store: store))
+        place()
         panel.orderFrontRegardless()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
-                                               object: nil, queue: .main) { [weak self] _ in
-            guard let self else { return }
-            self.resize(to: self.panel.frame.size)
-        }
+                                               object: nil, queue: .main) { [weak self] _ in self?.place() }
+        mouseTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.trackMouse() }
     }
 
-    /// Keeps the panel pinned to the top-right corner, just under the menu bar.
-    func resize(to size: CGSize) {
+    /// Right edge of the main screen, vertically centered.
+    func place() {
         guard let screen = NSScreen.screens.first else { return }
         let vf = screen.visibleFrame
-        let frame = NSRect(x: vf.maxX - size.width - 4, y: vf.maxY - size.height, width: size.width, height: size.height)
-        panel.setFrame(frame, display: true)
+        panel.setFrame(NSRect(x: vf.maxX - windowSize.width, y: vf.midY - windowSize.height / 2,
+                              width: windowSize.width, height: windowSize.height), display: true)
+    }
+
+    /// Hover is computed from the mouse position, not SwiftUI hover, so it can't flicker.
+    func trackMouse() {
+        let m = NSEvent.mouseLocation
+        let f = panel.frame
+        let local = CGPoint(x: m.x - f.minX, y: f.height - (m.y - f.minY)) // SwiftUI top-left origin
+        let slack: CGFloat = store.expanded ? 14 : 6
+        let inside = store.shapeRect.insetBy(dx: -slack, dy: -slack).contains(local)
+        panel.ignoresMouseEvents = !inside
+        if inside {
+            outsideSince = nil
+            if !store.expanded { store.expanded = true }
+        } else if store.expanded {
+            if outsideSince == nil { outsideSince = Date() }
+            if let t = outsideSince, Date().timeIntervalSince(t) > 0.25 { store.expanded = false; outsideSince = nil }
+        }
     }
 
     func hide(for seconds: TimeInterval) {
@@ -533,8 +593,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @MainActor
 func snapshot(to path: String, expanded: Bool, home: String) {
     let store = Store(home: URL(fileURLWithPath: home), node: nil, cli: nil)
-    let view = RootView(store: store, expanded: expanded) { _ in }
-        .background(Color(white: 0.93))
+    store.expanded = expanded
+    let view = RootView(store: store).background(Color(white: 0.86))
     let r = ImageRenderer(content: view)
     r.scale = 2
     guard let img = r.nsImage, let tiff = img.tiffRepresentation,
