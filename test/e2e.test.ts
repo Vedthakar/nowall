@@ -53,15 +53,15 @@ exec "${process.execPath}" "${FAKE}" ${agent} "$@"
   if (config) writeFileSync(join(home, "config.json"), JSON.stringify({ v: 1, ...config }));
   const planPath = join(scratch, "plan.json");
   writeFileSync(planPath, JSON.stringify(plan));
+  const { NOWALL_SID: _ignored, ...parentEnv } = process.env;
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...parentEnv,
     PATH: `${bin}:${process.env.PATH}`,
     NOWALL_HOME: home,
     FAKE_PLAN: planPath,
     FAKE_NOWALL: `"${process.execPath}" "${CLI}"`,
     TZ: "America/Toronto",
   };
-  delete env.NOWALL_SID;
   const init = spawnSync(process.execPath, [CLI, "init", "--yes"], {
     cwd: repo,
     env,
