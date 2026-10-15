@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { readJsonSafe, writeAtomic } from "../fsafe.js";
 import type { AgentEvent } from "./types.js";
 
@@ -91,11 +92,24 @@ export function parseStreamJson(line: string): AgentEvent[] {
 }
 
 /** Merges our hook entries into a JSON settings file, replacing earlier nowall entries. */
-export function mergeHooksFile(path: string, build: (existing: Json) => Json): string {
-  // Symlink-safe: a repo can't redirect this write to e.g. ~/.zshrc.
-  const current = obj(readJsonSafe<unknown>(path)) ?? {};
-  writeAtomic(path, `${JSON.stringify(build(current), null, 2)}\n`, 0o644);
-  return path;
+export function mergeHooksFile(
+  path: string,
+  build: (existing: Json) => Json,
+  opts: { followSymlink?: boolean } = {},
+): string {
+  // Project files: symlink-safe, so a repo can't redirect this write to e.g. ~/.zshrc.
+  // User files (~/.claude/settings.json): follow the user's own dotfile symlinks.
+  let target = path;
+  if (opts.followSymlink) {
+    try {
+      target = realpathSync(path);
+    } catch {
+      // doesn't exist yet
+    }
+  }
+  const current = obj(readJsonSafe<unknown>(target)) ?? {};
+  writeAtomic(target, `${JSON.stringify(build(current), null, 2)}\n`, 0o644);
+  return target;
 }
 
 type HookGroup = {

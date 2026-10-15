@@ -37,6 +37,8 @@ export interface AgentAdapter {
   resumeCommand(sessionId?: string): string;
   /** Installs journaling hooks into the project; returns files written. */
   installHooks?(root: string, nowallCmd: string): string[];
+  /** Installs the same hooks at user level (every project), for `nowall setup`. */
+  installUserHooks?(home: string, nowallCmd: string): string[];
 }
 
 export type Runner = (

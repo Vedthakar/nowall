@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
+import { refreshAgents } from "./agents.js";
 import { runDemo } from "./demo.js";
 import { checkpoint, listCheckpoints, repoRoot, restore } from "./git.js";
 import { handleHook, trustedRoot } from "./hooks.js";
@@ -17,6 +18,7 @@ import {
   loadSession,
   saveSession,
 } from "./session.js";
+import { runLogs, runSetup, runStatusline, runTeardown, startNotch, stopNotch } from "./setup.js";
 import { isTrustedRepo, loadConfig, loadState } from "./state.js";
 import { writeSummary } from "./summary.js";
 import { type Deps, failover, fmtTime, runInteractive, startSession } from "./supervisor.js";
@@ -26,13 +28,17 @@ const VERSION = "0.1.0";
 const HELP = `nowall ${VERSION}: when your coding agent hits its usage limit, the work keeps going.
 
 Usage:
-  nowall init                 set up this repo (hooks, consent, optional shell alias)
+  nowall setup                turn nowall on for every project, find your agents, start the notch
+  nowall init                 set up just this repo instead (hooks, consent, optional shell alias)
   nowall run <agent> [args]   run an agent under nowall (the shell alias does this for you)
   nowall status               agents, sign-in, cooldowns, last session
   nowall undo [step]          list checkpoints, or restore files to one
   nowall demo                 watch a simulated failover (no real agents, no usage)
+  nowall logs [-f]            what a background takeover did (or is doing) in this repo
+  nowall agents               which agents nowall found, sign-in, cooldowns, usage
+  nowall notch [stop]         start or stop the macOS notch
   nowall note --task "..." [--status done|todo] | --decision "..."
-  nowall uninstall            remove hooks and the shell alias
+  nowall uninstall [--global]  remove this repo's hooks (or, with --global, everything setup added)
 `;
 
 /** Agent invocations that are not interactive work sessions: pass straight through. */
@@ -326,7 +332,40 @@ async function main(argv: string[]): Promise<number> {
     case "demo":
       return runDemo();
     case "uninstall":
-      return runUninstall();
+      return rest.includes("--global") ? runTeardown() : runUninstall();
+    case "setup":
+      return runSetup(rest);
+    case "agents": {
+      const snap = await refreshAgents();
+      if (rest.includes("--write")) return 0;
+      process.stdout.write(`${JSON.stringify(snap, null, 2)}\n`);
+      return 0;
+    }
+    case "statusline": {
+      let raw = "";
+      try {
+        raw = readFileSync(0, "utf8");
+      } catch {
+        // no input
+      }
+      return runStatusline(raw);
+    }
+    case "logs": {
+      const root = repoRoot(process.cwd());
+      if (!root) {
+        process.stderr.write("nowall logs: run this inside a git repository.\n");
+        return 1;
+      }
+      return runLogs(root, rest.includes("-f") || rest.includes("--follow"));
+    }
+    case "notch":
+      if (rest[0] === "stop") {
+        stopNotch();
+        process.stdout.write("Notch stopped.\n");
+        return 0;
+      }
+      process.stdout.write(`${startNotch()}\n`);
+      return 0;
     case "-v":
     case "--version":
       process.stdout.write(`${VERSION}\n`);

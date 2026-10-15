@@ -41,22 +41,41 @@ export const claude: AgentAdapter = {
   },
 
   installHooks(root, nowall) {
-    const hook = (name: string) => `${HOOK_MARK} ${nowall} hook ${name} --agent claude`;
     return [
-      mergeHooksFile(join(root, ".claude", "settings.local.json"), (existing) =>
-        withHooks(existing, {
-          SessionStart: [cmdHook(hook("session-start"), undefined, 30)],
-          UserPromptSubmit: [cmdHook(hook("prompt"), undefined, 10)],
-          PostToolUse: [cmdHook(hook("post-tool"), "Edit|Write|MultiEdit|NotebookEdit|Bash", 10)],
-          StopFailure: [cmdHook(hook("stop-failure"), "rate_limit", 30)],
-          Notification: [cmdHook(hook("notification"), undefined, 10)],
-          Stop: [cmdHook(hook("stop"), undefined, 10)],
-          SessionEnd: [cmdHook(hook("session-end"), undefined, 10)],
-        }),
+      mergeHooksFile(join(root, ".claude", "settings.local.json"), (e) => claudeHooks(e, nowall)),
+    ];
+  },
+
+  installUserHooks(home, nowall) {
+    return [
+      mergeHooksFile(
+        join(home, ".claude", "settings.json"),
+        (e) => {
+          const next = claudeHooks(e, nowall);
+          // Claude's 5h/weekly usage is only exposed to the status line; add a silent tap if none exists.
+          if (!next.statusLine) {
+            next.statusLine = { type: "command", command: `${HOOK_MARK} ${nowall} statusline` };
+          }
+          return next;
+        },
+        { followSymlink: true },
       ),
     ];
   },
 };
+
+function claudeHooks(existing: Record<string, unknown>, nowall: string): Record<string, unknown> {
+  const hook = (name: string) => `${HOOK_MARK} ${nowall} hook ${name} --agent claude`;
+  return withHooks(existing, {
+    SessionStart: [cmdHook(hook("session-start"), undefined, 30)],
+    UserPromptSubmit: [cmdHook(hook("prompt"), undefined, 10)],
+    PostToolUse: [cmdHook(hook("post-tool"), "Edit|Write|MultiEdit|NotebookEdit|Bash", 10)],
+    StopFailure: [cmdHook(hook("stop-failure"), "rate_limit", 30)],
+    Notification: [cmdHook(hook("notification"), undefined, 10)],
+    Stop: [cmdHook(hook("stop"), undefined, 10)],
+    SessionEnd: [cmdHook(hook("session-end"), undefined, 10)],
+  });
+}
 
 /**
  * Reads the most recent rate-limit error from a Claude transcript (JSONL). The StopFailure hook

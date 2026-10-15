@@ -85,14 +85,22 @@ export const codex: AgentAdapter = {
   },
 
   installHooks(root, nowall) {
-    const hook = (name: string) => `${HOOK_MARK} ${nowall} hook ${name} --agent codex`;
+    return [mergeHooksFile(join(root, ".codex", "hooks.json"), (e) => codexHooks(e, nowall))];
+  },
+
+  installUserHooks(home, nowall) {
     return [
-      mergeHooksFile(join(root, ".codex", "hooks.json"), (existing) =>
-        withHooks(existing, {
-          UserPromptSubmit: [cmdHook(hook("prompt"))],
-          PostToolUse: [cmdHook(hook("post-tool"))],
-        }),
-      ),
+      mergeHooksFile(join(home, ".codex", "hooks.json"), (e) => codexHooks(e, nowall), {
+        followSymlink: true,
+      }),
     ];
   },
 };
+
+function codexHooks(existing: Record<string, unknown>, nowall: string): Record<string, unknown> {
+  const hook = (name: string) => `${HOOK_MARK} ${nowall} hook ${name} --agent codex`;
+  return withHooks(existing, {
+    UserPromptSubmit: [cmdHook(hook("prompt"))],
+    PostToolUse: [cmdHook(hook("post-tool"))],
+  });
+}

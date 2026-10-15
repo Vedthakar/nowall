@@ -65,18 +65,26 @@ export const cursor: AgentAdapter = {
 
   installHooks(root, nowall) {
     // Documented for the IDE agent; CLI support unverified. Harmless if ignored.
+    return [mergeHooksFile(join(root, ".cursor", "hooks.json"), (e) => cursorHooks(e, nowall))];
+  },
+
+  installUserHooks(home, nowall) {
     return [
-      mergeHooksFile(join(root, ".cursor", "hooks.json"), (existing) => {
-        const hooks = { ...((existing.hooks as Record<string, unknown[]>) ?? {}) };
-        hooks.afterFileEdit = [
-          ...(hooks.afterFileEdit ?? []).filter((h) => !isOurs(h)),
-          { command: `${HOOK_MARK} ${nowall} hook post-tool --agent cursor` },
-        ];
-        return { version: 1, ...existing, hooks };
+      mergeHooksFile(join(home, ".cursor", "hooks.json"), (e) => cursorHooks(e, nowall), {
+        followSymlink: true,
       }),
     ];
   },
 };
+
+function cursorHooks(existing: Record<string, unknown>, nowall: string): Record<string, unknown> {
+  const hooks = { ...((existing.hooks as Record<string, unknown[]>) ?? {}) };
+  hooks.afterFileEdit = [
+    ...(hooks.afterFileEdit ?? []).filter((h) => !isOurs(h)),
+    { command: `${HOOK_MARK} ${nowall} hook post-tool --agent cursor` },
+  ];
+  return { version: 1, ...existing, hooks };
+}
 
 export const antigravity: AgentAdapter = {
   id: "antigravity",
