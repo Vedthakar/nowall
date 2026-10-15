@@ -53,7 +53,7 @@ exec "${process.execPath}" "${FAKE}" ${agent} "$@"
   if (config) writeFileSync(join(home, "config.json"), JSON.stringify({ v: 1, ...config }));
   const planPath = join(scratch, "plan.json");
   writeFileSync(planPath, JSON.stringify(plan));
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     PATH: `${bin}:${process.env.PATH}`,
     NOWALL_HOME: home,
