@@ -3,13 +3,21 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
+import { runDemo } from "./demo.js";
 import { checkpoint, listCheckpoints, repoRoot, restore } from "./git.js";
-import { handleHook } from "./hooks.js";
+import { handleHook, trustedRoot } from "./hooks.js";
 import { runInit, runUninstall } from "./init.js";
 import { agentName } from "./prompt.js";
 import { AGENT_IDS, type AgentId, isAgentId } from "./schemas.js";
-import { appendJournal, isInitialized, loadSession, saveSession } from "./session.js";
-import { loadConfig, loadState } from "./state.js";
+import {
+  acquireLock,
+  appendJournal,
+  handoffProblem,
+  isInitialized,
+  loadSession,
+  saveSession,
+} from "./session.js";
+import { isTrustedRepo, loadConfig, loadState } from "./state.js";
 import { writeSummary } from "./summary.js";
 import { type Deps, failover, fmtTime, runInteractive, startSession } from "./supervisor.js";
 
@@ -22,6 +30,7 @@ Usage:
   nowall run <agent> [args]   run an agent under nowall (the shell alias does this for you)
   nowall status               agents, sign-in, cooldowns, last session
   nowall undo [step]          list checkpoints, or restore files to one
+  nowall demo                 watch a simulated failover (no real agents, no usage)
   nowall note --task "..." [--status done|todo] | --decision "..."
   nowall uninstall            remove hooks and the shell alias
 `;
@@ -87,14 +96,24 @@ async function cmdRun(argv: string[]): Promise<number> {
     return 127;
   }
   const root = repoRoot(process.cwd());
+  const problem = root && isInitialized(root) ? handoffProblem(root) : null;
+  if (problem) process.stderr.write(`nowall: not protecting this session: ${problem}.\n`);
   const passthrough =
     !root ||
     !isInitialized(root) ||
+    !isTrustedRepo(root) ||
+    problem !== null ||
     process.env.NOWALL_SID !== undefined ||
     process.env.NOWALL_DISABLE === "1" ||
     args.some((a) => PASSTHROUGH_FLAGS.has(a)) ||
     (agent === "claude" && CLAUDE_SUBCOMMANDS.has(args[0] ?? ""));
   if (passthrough || !root) {
+    return spawnSync(bin, args, { stdio: "inherit" }).status ?? 1;
+  }
+  if (!acquireLock(root)) {
+    process.stderr.write(
+      "nowall: another nowall session is active in this repo; running without failover.\n",
+    );
     return spawnSync(bin, args, { stdio: "inherit" }).status ?? 1;
   }
 
@@ -124,6 +143,55 @@ async function cmdRun(argv: string[]): Promise<number> {
   deps.binaries = await availableBinaries();
   const hit = { kind: "quota" as const, window: limit.window, message: limit.message };
   await failover(deps, session, agent, limit.resetsAt ? { ...hit, resetsAt: limit.resetsAt } : hit);
+  process.stdout.write(`\n${writeSummary(root, loadSession(root) ?? session)}\n`);
+  return 0;
+}
+
+/** Continues a session whose agent nowall didn't launch (opened in a new Terminal by the hook). */
+async function cmdTakeover(argv: string[]): Promise<number> {
+  const root = trustedRoot(process.cwd());
+  const from = flag(argv, "--from");
+  const session = root ? loadSession(root) : null;
+  if (
+    !root ||
+    !isAgentId(from) ||
+    !session ||
+    session.sid !== flag(argv, "--sid") ||
+    session.finished
+  ) {
+    process.stderr.write("nowall takeover: nothing to take over here.\n");
+    return 1;
+  }
+  if (!acquireLock(root)) {
+    process.stderr.write(
+      "nowall takeover: another nowall session is already running in this repo.\n",
+    );
+    return 1;
+  }
+  const last = loadState().agents[from]?.lastLimit;
+  const limit = {
+    kind: "quota" as const,
+    window: last?.window ?? ("unknown" as const),
+    message: last?.message ?? "usage limit reached",
+  };
+  const deps: Deps = {
+    root,
+    adapters: ADAPTERS,
+    binaries: await availableBinaries(),
+    config: loadConfig(),
+    now: () => new Date(),
+    out: (s) => process.stdout.write(s),
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  };
+  process.stdout.write(
+    `${agentName(from)} hit its usage limit in ${root}.\nnowall is continuing the work here. Leave the ${agentName(from)} session paused until this finishes.\n`,
+  );
+  await failover(
+    deps,
+    session,
+    from,
+    last?.resetsAt ? { ...limit, resetsAt: last.resetsAt } : limit,
+  );
   process.stdout.write(`\n${writeSummary(root, loadSession(root) ?? session)}\n`);
   return 0;
 }
@@ -253,6 +321,10 @@ async function main(argv: string[]): Promise<number> {
       return cmdUndo(rest);
     case "init":
       return runInit(rest);
+    case "takeover":
+      return cmdTakeover(rest);
+    case "demo":
+      return runDemo();
     case "uninstall":
       return runUninstall();
     case "-v":

@@ -91,6 +91,8 @@ export interface Config {
   yolo: boolean;
   stop: { maxTurns: number; maxMinutes: number; noDiffTurns: number };
   defaultCooldownMinutes: number;
+  /** When an agent nowall didn't launch (e.g. Claude desktop app) hits its limit: open a Terminal and continue, or do nothing. */
+  takeover: "terminal" | "off";
   fallback: {
     enabled: boolean;
     chinaConsent: boolean;
@@ -105,6 +107,7 @@ export const DEFAULT_CONFIG: Config = {
   yolo: false,
   stop: { maxTurns: 30, maxMinutes: 120, noDiffTurns: 3 },
   defaultCooldownMinutes: 300,
+  takeover: "terminal",
   fallback: { enabled: false, chinaConsent: false },
 };
 
