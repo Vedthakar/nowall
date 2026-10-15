@@ -1,0 +1,6 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "files": { "ignore": ["dist", "coverage", "node_modules", "fixtures/private"] },
+  "formatter": { "indentStyle": "space", "lineWidth": 100 },
+  "linter": { "rules": { "recommended": true } }
+}

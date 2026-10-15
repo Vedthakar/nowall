@@ -1,0 +1,28 @@
+{
+  "name": "nowall",
+  "version": "0.1.0",
+  "description": "When your coding agent hits its usage limit, the work keeps going in the next one.",
+  "type": "module",
+  "bin": {
+    "nowall": "dist/cli.js"
+  },
+  "files": ["dist"],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "author": "Ved Thakar",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "format": "biome format --write ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}
