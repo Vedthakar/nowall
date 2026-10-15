@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Simulates Claude Code / Codex / Cursor for end-to-end tests without burning real usage.
 // Usage: fake-agent.mjs <agent-name> [agent args...]
+// A turn may also set `auth: "<message>"` to simulate an expired or missing login.
 // Behaviour comes from the JSON plan at $FAKE_PLAN: { "<agent>": [turn, turn, ...] }, where a turn is
 //   { prompt?, files?: {path: content}, notes?: [["--task","x"],...], tasks?: {...}, text?, limit?: "message" }
 // Every invocation is logged to $FAKE_PLAN.calls.jsonl so tests can assert on prompts and flags.
@@ -57,6 +58,7 @@ function doWork() {
 
 if (!headless) {
   // Interactive Claude Code.
+  fireClaudeHook("SessionStart", { source: "startup" });
   if (turn.prompt) fireClaudeHook("UserPromptSubmit", { prompt: turn.prompt });
   doWork();
   if (!turn.limit) process.exit(0);
@@ -74,6 +76,24 @@ if (!headless) {
   // Real Claude now waits for the reset; nowall must terminate us.
   process.on("SIGTERM", () => process.exit(143));
   setInterval(() => {}, 1000);
+} else if (turn.auth) {
+  // Expired / missing login, in each agent's real shape.
+  if (name === "codex") {
+    out({ type: "turn.failed", error: { message: turn.auth } });
+    process.exit(1);
+  }
+  if (name === "cursor") {
+    process.stderr.write(`Error: ${turn.auth}\n`);
+    process.exit(1);
+  }
+  out({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    result: turn.auth,
+    terminal_reason: "api_error",
+  });
+  process.exit(1);
 } else if (name === "codex") {
   out({ type: "thread.started", thread_id: `codex-thread-${n}` });
   out({ type: "turn.started" });

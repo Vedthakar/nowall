@@ -30,6 +30,16 @@ export const cursor: AgentAdapter = {
   async detect(run, bin) {
     const version = await versionOf(run, bin);
     if (version === null) return { installed: false, signedIn: false };
+    // `status --format json` reports isAuthenticated:true even when the server rejects an expired
+    // login (seen on 2026.07.09); the plain output says "unable to fetch user details" then.
+    const plain = await run(bin, ["status"]);
+    if (
+      /unable to fetch user details|not logged in|authentication required/i.test(
+        plain.stdout + plain.stderr,
+      )
+    ) {
+      return { installed: true, version, signedIn: false };
+    }
     const r = await run(bin, ["status", "--format", "json"]);
     try {
       const s = JSON.parse(r.stdout) as { isAuthenticated?: boolean };

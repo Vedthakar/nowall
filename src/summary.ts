@@ -34,8 +34,9 @@ export function renderSummary(root: string, session: Session): string {
   const segs = session.segments;
   const lines = [HEADLINE[reason]];
 
-  const last = segs.at(-1);
-  const prev = segs.at(-2);
+  const worked = segs.filter((s) => s.endReason !== "auth");
+  const last = worked.at(-1);
+  const prev = worked.at(-2);
   if (last && prev?.endReason === "limit" && prev.limit) {
     const reset = prev.limit.resetsAt ? ` (resets ${fmtTime(prev.limit.resetsAt)})` : "";
     lines[0] += ` The last part was built by ${agentName(last.agent)} because ${agentName(prev.agent)} hit its ${WINDOW[prev.limit.window] ?? "usage limit"}${reset}.`;
@@ -48,7 +49,11 @@ export function renderSummary(root: string, session: Session): string {
       const stat = s.checkpoint ? shortStat(root, from, s.checkpoint) : "";
       if (s.checkpoint) from = s.checkpoint;
       const why =
-        s.endReason === "limit" ? `hit ${WINDOW[s.limit?.window ?? "unknown"]}` : "finished";
+        s.endReason === "limit"
+          ? `hit ${WINDOW[s.limit?.window ?? "unknown"]}`
+          : s.endReason === "auth"
+            ? "not signed in, skipped"
+            : "finished";
       lines.push(`  ${i + 1}. ${agentName(s.agent)}: ${stat || "no file changes"} (${why})`);
     });
     lines.push("");
@@ -61,6 +66,7 @@ export function renderSummary(root: string, session: Session): string {
       );
     }
   }
+  for (const n of session.notices ?? []) lines.push(`Action needed: ${n}`);
   return sanitizeTerminal(lines.join("\n"));
 }
 

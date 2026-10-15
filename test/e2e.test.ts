@@ -1,14 +1,15 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { sh, tempRepo } from "./helpers.js";
 
@@ -260,6 +261,112 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
     expect(r.status, r.stderr).toBe(0);
     expect(readFileSync(join(w.repo, "src/health.ts"), "utf8")).toBe(
       "export const health = () => 'ok';\n",
+    );
+  });
+});
+
+describe("end-to-end: resilience and other journeys", { timeout: 90_000 }, () => {
+  it("skips an agent that isn't signed in and tells the user how to fix it", () => {
+    const w = world({
+      claude: [CLAUDE_LIMITED],
+      codex: [{ auth: "Authentication required. Please run 'codex login' first." }],
+      cursor: [{ files: { "test/health.test.ts": "// t\n" }, tasks: done(["a"]) }],
+    });
+    const r = run(w);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(
+      "The last part was built by Cursor because Claude Code hit its session limit",
+    );
+    expect(r.stdout).toMatch(/2\. Codex: .*not signed in, skipped/);
+    expect(r.stdout).toContain("Action needed: Codex isn't signed in. Run: codex login");
+    const state = JSON.parse(readFileSync(join(w.env.NOWALL_HOME as string, "state.json"), "utf8"));
+    expect(state.agents.codex).toBeUndefined(); // an auth problem is not a usage limit
+  });
+
+  it("a stale tasks.json from an earlier session can't end a new one early", () => {
+    const w = world({
+      claude: [CLAUDE_LIMITED],
+      codex: [{ files: { "a.ts": "1" } }, { files: { "a.ts": "2" }, tasks: done(["x"]) }],
+    });
+    writeFileSync(join(w.repo, ".handoff", "tasks.json"), JSON.stringify(done(["old task"])));
+    const r = run(w);
+    expect(r.stdout).toContain("Your task is done.");
+    expect(calls(w).filter((c) => c.name === "codex")).toHaveLength(2);
+  });
+
+  it("a second concurrent session in the same repo runs without failover", () => {
+    const w = world({ claude: [{ files: { "x.ts": "x" } }] });
+    writeFileSync(join(w.repo, ".handoff", "active.lock"), String(process.pid)); // a live pid
+    const r = run(w);
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("another nowall session is active");
+  });
+
+  it("does nothing special in a repo this user never initialized", () => {
+    const w = world({ claude: [{ files: { "x.ts": "x" } }] });
+    writeFileSync(join(w.env.NOWALL_HOME as string, "repos.json"), "[]");
+    const r = run(w);
+    expect(r.status).toBe(0);
+    expect(existsSync(join(w.repo, ".handoff", "session.json"))).toBe(false);
+  });
+
+  it("Claude desktop app (no nowall run): the limit hook takes over in the background", async () => {
+    const w = world(
+      {
+        claude: [CLAUDE_LIMITED],
+        cursor: [
+          { text: "finishing", files: { "test/h.test.ts": "// t\n" }, tasks: done(["a", "b"]) },
+        ],
+      },
+      { order: ["claude", "cursor"] },
+    );
+    w.env.NOWALL_TAKEOVER = "inline";
+    // Launch "Claude" directly, the way the desktop app would, not through nowall.
+    const claude = spawn(join(dirname(w.plan), "bin", "claude"), [], {
+      cwd: w.repo,
+      env: w.env,
+      stdio: "ignore",
+    });
+    const sessionFile = join(w.repo, ".handoff", "session.json");
+    const deadline = Date.now() + 60_000;
+    let session: { finished?: { reason: string }; segments: { agent: string }[] } | null = null;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 300));
+      try {
+        session = JSON.parse(readFileSync(sessionFile, "utf8"));
+      } catch {
+        continue;
+      }
+      const hasSummary = readdirSync(join(w.repo, ".handoff")).some((f) =>
+        f.startsWith("summary-"),
+      );
+      if (session?.finished && hasSummary) break;
+    }
+    claude.kill("SIGTERM");
+    expect(session?.finished?.reason).toBe("complete");
+    expect(session?.segments.map((s) => s.agent)).toEqual(["claude", "cursor"]);
+    const summary = readFileSync(
+      join(
+        w.repo,
+        ".handoff",
+        readdirSync(join(w.repo, ".handoff")).find((f) => f.startsWith("summary-")) ?? "",
+      ),
+      "utf8",
+    );
+    expect(summary).toContain(
+      "The last part was built by Cursor because Claude Code hit its session limit",
+    );
+    expect(existsSync(join(w.repo, "test/h.test.ts"))).toBe(true);
+  });
+
+  it("nowall demo runs a full simulated failover", () => {
+    const r = spawnSync(process.execPath, [CLI, "demo"], {
+      encoding: "utf8",
+      env: { ...process.env, NOWALL_SID: "" },
+    });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(
+      "The last part was built by Cursor because Claude Code hit its session limit",
     );
   });
 });

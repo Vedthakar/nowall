@@ -35,6 +35,17 @@ export function classifyLimit(text: string, now: Date, defaultTz?: string): Limi
   return null;
 }
 
+/**
+ * True when error text means the agent isn't signed in (or its login expired). Real examples:
+ * Claude Code "Failed to authenticate: OAuth session expired and could not be refreshed",
+ * Cursor CLI "Authentication required. Please run 'agent login' first".
+ */
+export function isAuthError(text: string): boolean {
+  return /authentication required|failed to authenticate|not (logged|signed) in|please (run|use) [`'"]?[\w-]+ login|oauth session expired|invalid api key|unauthorized|\b401\b|authentication_failed/i.test(
+    text,
+  );
+}
+
 const TRANSIENT: RegExp[] = [
   /temporarily limiting requests/i,
   /request rejected \(429\)/i,

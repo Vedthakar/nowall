@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import type { AgentAdapter } from "./adapters/types.js";
 import { readJsonSafe, sanitizeTerminal } from "./fsafe.js";
 import { checkpoint, snapshotTree } from "./git.js";
+import { isAuthError } from "./limits.js";
 import { buildPacket } from "./packet.js";
 import { agentName, continuePrompt, masterPrompt } from "./prompt.js";
 import { loadEnvValues, redact } from "./redact.js";
@@ -116,6 +117,8 @@ export interface TurnResult {
   sessionId?: string;
   limit: LimitHit | null;
   isError: boolean;
+  /** The agent isn't signed in / its login expired: skip it, don't count it as a failure. */
+  authError: boolean;
   exitCode: number;
   interrupted: boolean;
 }
@@ -150,7 +153,13 @@ export async function runHeadlessTurn(
   };
   process.once("SIGINT", onInt);
 
-  const result: TurnResult = { limit: null, isError: false, exitCode: 0, interrupted: false };
+  const result: TurnResult = {
+    limit: null,
+    isError: false,
+    authError: false,
+    exitCode: 0,
+    interrupted: false,
+  };
   const errorTexts: string[] = [];
   let sawDone = false;
   let stderr = "";
@@ -204,11 +213,12 @@ export async function runHeadlessTurn(
     if (hit && (!result.limit || (result.limit.kind === "transient" && hit.kind === "quota")))
       result.limit = hit;
   }
+  if (!result.limit && result.isError) result.authError = errorTexts.some(isAuthError);
   return result;
 }
 
 function available(deps: Deps): Set<AgentId> {
-  return new Set(Object.keys(deps.binaries) as AgentId[]);
+  return new Set((Object.keys(deps.binaries) as AgentId[]).filter((id) => deps.binaries[id]));
 }
 
 /**
@@ -226,28 +236,34 @@ export async function failover(
   let current: AgentId = from;
   let currentLimit = limit;
   let turns = 0;
+  let skippedForAuth = false;
+  let cp = { ref: "", commit: session.baseCommit };
 
   for (;;) {
-    // 1. Record the limit and close the segment that hit it.
-    let state = recordLimit(
-      loadState(),
-      current,
-      currentLimit,
-      deps.now(),
-      deps.config.defaultCooldownMinutes,
-    );
-    saveState(state);
-    const cp = takeCheckpoint(deps.root, session, `handoff from ${current}`);
-    closeSegment(session, "limit", cp.commit, currentLimit, deps.now());
-    appendJournal(deps.root, {
-      sid: session.sid,
-      agent: current,
-      kind: "limit",
-      text: currentLimit.message,
-    });
+    // 1. Record the limit and close the segment that hit it (not again after an auth skip).
+    if (!skippedForAuth) {
+      saveState(
+        recordLimit(
+          loadState(),
+          current,
+          currentLimit,
+          deps.now(),
+          deps.config.defaultCooldownMinutes,
+        ),
+      );
+      cp = takeCheckpoint(deps.root, session, `handoff from ${current}`);
+      closeSegment(session, "limit", cp.commit, currentLimit, deps.now());
+      appendJournal(deps.root, {
+        sid: session.sid,
+        agent: current,
+        kind: "limit",
+        text: currentLimit.message,
+      });
+    }
+    skippedForAuth = false;
 
     // 2. Choose who continues.
-    state = loadState();
+    const state = loadState();
     const next = pickNext(deps.config, state, available(deps), [current], deps.now());
     if (!next) {
       const er = earliestReset(state, deps.now());
@@ -299,6 +315,26 @@ export async function failover(
         saveSession(deps.root, session);
       }
       if (r.interrupted) return finish(deps, session, "interrupted");
+
+      if (r.authError) {
+        // Not signed in: drop this agent for the rest of the run and try the next one.
+        const a = deps.adapters[next];
+        const notice = `${a.displayName} isn't signed in. Run: ${a.loginHint}`;
+        session.notices = [...new Set([...(session.notices ?? []), notice])];
+        closeSegment(
+          session,
+          "auth",
+          takeCheckpoint(deps.root, session, `${next} not signed in`).commit,
+          null,
+          deps.now(),
+        );
+        saveSession(deps.root, session);
+        delete deps.binaries[next];
+        deps.out(dim(`  ${notice}. Trying the next agent.\n`));
+        skippedForAuth = true;
+        handedOff = true;
+        continue;
+      }
 
       if (r.limit?.kind === "quota") {
         current = next;

@@ -60,7 +60,7 @@ export interface Segment {
   mode: "interactive" | "headless";
   startedAt: string;
   endedAt?: string;
-  endReason?: "limit" | "exit" | StopReason;
+  endReason?: "limit" | "exit" | "auth" | StopReason;
   limit?: { window: LimitWindow; message: string; resetsAt?: string };
   /** Checkpoint commit taken when the segment ended. */
   checkpoint?: string;
@@ -84,6 +84,8 @@ export interface Session {
   baseCommit: string;
   checkpoints: number;
   segments: Segment[];
+  /** Things the user must do, shown in the summary (e.g. "run cursor-agent login"). */
+  notices?: string[];
   finished?: { at: string; reason: StopReason };
 }
 
