@@ -131,3 +131,22 @@ describe("loadEnvValues", () => {
     expect(values).not.toContain("1");
   });
 });
+
+describe("redact: linear time on adversarial input (ReDoS regression)", () => {
+  const inputs = {
+    dots: "x.".repeat(100_000),
+    names: "api_key".repeat(30_000),
+    tokens: `${"token_".repeat(40_000)}!`,
+    emails: `a@${"a.".repeat(100_000)}`,
+    urls: `ftp://${"a:".repeat(100_000)}`,
+    bearer: `Bearer ${"a".repeat(200_000)}`,
+    pems: "-----BEGIN RSA PRIVATE KEY-----\n".repeat(5_000),
+  };
+  for (const [name, input] of Object.entries(inputs)) {
+    it(name, () => {
+      const t = performance.now();
+      redact(input, { emails: true });
+      expect(performance.now() - t).toBeLessThan(500);
+    });
+  }
+});
