@@ -30,3 +30,6 @@ fixtures/private/
 .vscode/
 .idea/
 *.log
+
+# macOS notch build output
+notch/build/
