@@ -17,7 +17,7 @@
   "bin": {
     "nowall": "dist/cli.js"
   },
-  "files": ["dist", "scripts/fake-agent.mjs"],
+  "files": ["dist", "scripts/fake-agent.mjs", "notch/build/NowallNotch.app", "install.sh"],
   "engines": {
     "node": ">=20"
   },
@@ -29,8 +29,10 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "stress": "npm run build && node scripts/stress.mjs",
-    "prepack": "npm run build",
-    "prepublishOnly": "npm run lint && npm run typecheck && npm test"
+    "prepack": "npm run build && npm run build:notch",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm test",
+    "build:notch": "sh scripts/build-notch.sh",
+    "install:local": "npm install -g \"$(npm pack --silent | tail -1)\""
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
