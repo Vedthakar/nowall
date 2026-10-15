@@ -24,8 +24,14 @@ const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 
 /** Runs the hook command that `nowall init` installed for `event`, exactly as Claude would. */
 function fireClaudeHook(event, payload) {
-  const settings = JSON.parse(readFileSync(join(cwd, ".claude/settings.local.json"), "utf8"));
-  for (const group of settings.hooks?.[event] ?? []) {
+  // Like Claude Code: user settings (~/.claude/settings.json) plus the project's local settings.
+  const groups = [
+    join(process.env.HOME ?? "", ".claude/settings.json"),
+    join(cwd, ".claude/settings.local.json"),
+  ]
+    .filter((f) => existsSync(f))
+    .flatMap((f) => JSON.parse(readFileSync(f, "utf8")).hooks?.[event] ?? []);
+  for (const group of groups) {
     for (const h of group.hooks ?? []) {
       spawnSync("sh", ["-c", h.command], {
         input: JSON.stringify({ hook_event_name: event, cwd, session_id: "fake", ...payload }),

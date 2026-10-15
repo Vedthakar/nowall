@@ -2,10 +2,13 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -257,5 +260,112 @@ describe("journeys: interrupting", () => {
     expect(code).toBe(0);
     expect(out).toContain("Stopped by you.");
     expect(out).toContain("Keep going interactively: cursor-agent");
+  });
+});
+
+describe("journeys: one-command global setup", { timeout: 90_000 }, () => {
+  it("setup finds agents, installs user hooks once, keeps user settings, and teardown reverses it", () => {
+    const s = sandbox();
+    mkdirSync(join(s.home, ".claude"), { recursive: true });
+    mkdirSync(join(s.home, ".cursor"), { recursive: true });
+    // The user's settings live in a dotfiles repo and are symlinked in.
+    const dotfiles = join(s.scratch, "dotfiles-settings.json");
+    writeFileSync(
+      dotfiles,
+      JSON.stringify({
+        model: "opus",
+        hooks: { Stop: [{ hooks: [{ type: "command", command: "say done" }] }] },
+      }),
+    );
+    symlinkSync(dotfiles, join(s.home, ".claude", "settings.json"));
+
+    const r = s.nowall(["setup", "--yes", "--no-notch"], s.scratch);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("Claude Code");
+    expect(r.stdout).toContain("nowall is on.");
+    s.nowall(["setup", "--yes", "--no-notch"], s.scratch); // idempotent
+
+    expect(lstatSync(join(s.home, ".claude", "settings.json")).isSymbolicLink()).toBe(true);
+    const settings = JSON.parse(readFileSync(dotfiles, "utf8"));
+    expect(settings.model).toBe("opus");
+    expect(JSON.stringify(settings.hooks.Stop)).toContain("say done");
+    expect(settings.hooks.StopFailure).toHaveLength(1);
+    expect(settings.statusLine.command).toContain("statusline");
+    expect(existsSync(join(s.home, ".cursor", "hooks.json"))).toBe(true);
+    expect(existsSync(join(s.home, ".codex", "hooks.json"))).toBe(false); // no Codex here: untouched
+    expect(JSON.parse(readFileSync(join(s.home, "config.json"), "utf8")).scope).toBe("global");
+    expect(existsSync(join(s.home, "agents.json"))).toBe(true);
+
+    expect(s.nowall(["uninstall", "--global"], s.scratch).status).toBe(0);
+    const after = JSON.parse(readFileSync(dotfiles, "utf8"));
+    expect(after.model).toBe("opus");
+    expect(JSON.stringify(after)).not.toContain("NOWALL_HOOK");
+    expect(after.statusLine).toBeUndefined();
+    expect(JSON.stringify(after.hooks.Stop)).toContain("say done");
+  });
+
+  it("after setup, a desktop-app Claude session in a never-initialized repo is taken over silently", async () => {
+    const s = sandbox({
+      plan: {
+        claude: [LIMITED],
+        cursor: [{ text: "done", files: { "b.ts": "2\n" }, tasks: DONE }],
+      },
+    });
+    s.gitInit();
+    mkdirSync(join(s.home, ".claude"), { recursive: true });
+    expect(s.nowall(["setup", "--yes", "--no-notch"], s.scratch).status).toBe(0);
+    // Launch "Claude" directly like the desktop app does: no nowall run, no nowall init.
+    const claude = spawn(join(s.scratch, "bin", "claude"), [], {
+      cwd: s.repo,
+      env: s.env,
+      stdio: "ignore",
+    });
+    const statusDir = join(s.home, "status");
+    let status: { phase?: string; shares?: { agent: string }[] } = {};
+    for (let i = 0; i < 200 && status.phase !== "done"; i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      try {
+        const f = readdirSync(statusDir)[0];
+        if (f) status = JSON.parse(readFileSync(join(statusDir, f), "utf8"));
+      } catch {
+        // not yet
+      }
+    }
+    const log = join(s.repo, ".handoff", "takeover.log");
+    for (let i = 0; i < 50 && !readFileSync(log, "utf8").includes("Your task is done."); i++) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    claude.kill("SIGTERM");
+    expect(status.phase).toBe("done");
+    expect(status.shares?.map((x) => x.agent)).toEqual(["claude", "cursor"]);
+    expect(existsSync(join(s.repo, "b.ts"))).toBe(true);
+    expect(readFileSync(join(s.repo, ".handoff", "takeover.log"), "utf8")).toContain(
+      "Your task is done.",
+    );
+    expect(sh(s.repo, "git", ["status", "--porcelain"])).toBe(
+      "?? a.ts\n?? b.ts".replace(/\n/g, "\n"),
+    );
+  });
+
+  it("statusline keeps Claude's usage and agents reports it (plus Codex usage from its logs)", () => {
+    const s = sandbox({ agents: ["claude", "codex"] });
+    const reset = Math.floor(Date.now() / 1000) + 3600;
+    s.nowall(
+      ["statusline"],
+      s.scratch,
+      JSON.stringify({ rate_limits: { five_hour: { used_percentage: 37.5, resets_at: reset } } }),
+    );
+    const day = join(s.home, ".codex", "sessions", "2026", "10", "15");
+    mkdirSync(day, { recursive: true });
+    writeFileSync(
+      join(day, "rollout-synthetic.jsonl"),
+      `${JSON.stringify({ type: "event_msg", payload: { type: "token_count", rate_limits: { primary: { used_percent: 61, window_minutes: 300, resets_at: reset } } } })}\n`,
+    );
+    const r = s.nowall(["agents"], s.scratch);
+    const snap = JSON.parse(r.stdout);
+    const claude = snap.agents.find((a: { id: string }) => a.id === "claude");
+    const codex = snap.agents.find((a: { id: string }) => a.id === "codex");
+    expect(claude.usage[0]).toMatchObject({ label: "5h", usedPct: 37.5 });
+    expect(codex.usage[0]).toMatchObject({ label: "5h", usedPct: 61 });
   });
 });
