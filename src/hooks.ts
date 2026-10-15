@@ -81,7 +81,6 @@ export function handleHook(
   input: Json,
   env: NodeJS.ProcessEnv,
   now: Date,
-  background: (hook: string, input: Json) => void = runInBackground,
 ): string {
   const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
   // Prompt/edit hooks run on every tool call: no git process on that path.
@@ -92,15 +91,12 @@ export function handleHook(
 
   switch (name) {
     case "session-start":
-      // The base snapshot can take seconds in a big repo; never make the agent wait for it.
-      if (!env.NOWALL_SID) background("base-snapshot", { cwd: root, session_id: sid.slice(2) });
+      // Synchronous on purpose: the base must predate the agent's first edit, or that work would
+      // look like it was already there. Fast thanks to the persistent snapshot index (warmed by init).
+      if (!env.NOWALL_SID) ensureExternalSession(root, sid, agent, now);
       return JSON.stringify({
         hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: JOURNAL_RULE },
       });
-
-    case "base-snapshot":
-      ensureExternalSession(root, sid, agent, now);
-      return "";
 
     case "prompt": {
       const prompt = typeof input.prompt === "string" ? input.prompt : "";
@@ -184,28 +180,30 @@ export function launchTakeover(
     return null;
   }
   const script = join(handoffDir(root), `takeover-${sid}.command`);
+  // Values travel as quoted env vars; the shell command itself is a constant string, so nothing in
+  // a path or id can inject commands. Running via the login shell picks up the user's own PATH
+  // (where agent CLIs usually live); the hook's PATH is prepended in case it knows more.
+  const vars: Record<string, string> = {
+    NOWALL_NODE: process.execPath,
+    NOWALL_CLI: cli,
+    NOWALL_TAKEOVER_SID: sid,
+    NOWALL_TAKEOVER_FROM: agent,
+    NOWALL_EXTRA_PATH: env.PATH ?? "",
+  };
+  if (env.NOWALL_HOME) vars.NOWALL_HOME = env.NOWALL_HOME;
+  const exports = Object.entries(vars)
+    .map(([k, v]) => `export ${k}=${shq(v)}`)
+    .join("\n");
+  const inner =
+    'export PATH="$NOWALL_EXTRA_PATH:$PATH"; exec "$NOWALL_NODE" "$NOWALL_CLI" takeover --sid "$NOWALL_TAKEOVER_SID" --from "$NOWALL_TAKEOVER_FROM"';
   writeAtomic(
     script,
-    `#!/bin/sh\ncd ${shq(root)} || exit 1\nexec ${[process.execPath, ...args].map(shq).join(" ")}\n`,
+    `#!/bin/sh\ncd ${shq(root)} || exit 1\n${exports}\nexec "\${SHELL:-/bin/zsh}" -lic ${shq(inner)}\n`,
     0o700,
   );
   chmodSync(script, 0o700);
   open(script);
   return script;
-}
-
-/** Runs `nowall hook <name>` detached, so the agent's hook returns immediately. */
-function runInBackground(hook: string, input: Json): void {
-  const child = spawn(
-    process.execPath,
-    [realpathSync(process.argv[1] ?? ""), "hook", hook, "--agent", "claude"],
-    {
-      detached: true,
-      stdio: ["pipe", "ignore", "ignore"],
-    },
-  );
-  child.stdin?.end(JSON.stringify(input));
-  child.unref();
 }
 
 /** realpath that also works for files that don't exist yet (resolves the nearest existing parent). */

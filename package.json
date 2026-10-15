@@ -2,25 +2,35 @@
   "name": "nowall",
   "version": "0.1.0",
   "description": "When your coding agent hits its usage limit, the work keeps going in the next one.",
+  "keywords": ["claude-code", "cursor", "codex", "ai-agents", "failover", "rate-limit", "cli"],
+  "homepage": "https://github.com/Vedthakar/nowall#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Vedthakar/nowall.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Vedthakar/nowall/issues"
+  },
+  "license": "MIT",
+  "author": "Ved Thakar",
   "type": "module",
   "bin": {
     "nowall": "dist/cli.js"
   },
-  "files": [
-    "dist"
-  ],
+  "files": ["dist", "scripts/fake-agent.mjs"],
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT",
-  "author": "Ved Thakar",
+  "os": ["darwin", "linux"],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "stress": "npm run build && node scripts/stress.mjs"
+    "stress": "npm run build && node scripts/stress.mjs",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm test"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

@@ -189,14 +189,7 @@ describe("desktop takeover", () => {
   it("starts a session at SessionStart and opens a safely quoted takeover script on a limit", () => {
     const repo = initRepo();
     saveConfig({ ...DEFAULT_CONFIG, takeover: "terminal" });
-    handleHook(
-      "session-start",
-      "claude",
-      { cwd: repo, session_id: "abc-123" },
-      {},
-      NOW,
-      (hook, input) => handleHook(hook, "claude", input, {}, NOW),
-    );
+    handleHook("session-start", "claude", { cwd: repo, session_id: "abc-123" }, {}, NOW);
     expect(loadSession(repo)?.sid).toBe("c_abc-123");
 
     let opened = "";
@@ -205,7 +198,9 @@ describe("desktop takeover", () => {
     });
     expect(opened).toBe(script);
     const text = readFileSync(script as string, "utf8");
-    expect(text).toContain("takeover' '--sid' 'c_abc-123' '--from' 'claude'");
+    expect(text).toContain("export NOWALL_TAKEOVER_SID='c_abc-123'");
+    expect(text).toContain("export NOWALL_TAKEOVER_FROM='claude'");
+    expect(text).toContain('takeover --sid "$NOWALL_TAKEOVER_SID"');
     expect(statSync(script as string).mode & 0o777).toBe(0o700);
   });
 

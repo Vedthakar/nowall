@@ -6,7 +6,7 @@ import { mergeHooksFile, withHooks } from "./adapters/common.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
 import { shq, writeAtomic } from "./fsafe.js";
-import { excludeLocally, repoRoot } from "./git.js";
+import { excludeLocally, repoRoot, snapshotTree } from "./git.js";
 import { AGENT_IDS, type Config } from "./schemas.js";
 import { handoffDir, handoffProblem } from "./session.js";
 import { configDir, loadConfig, saveConfig, trustRepo, untrustRepo } from "./state.js";
@@ -147,6 +147,7 @@ export async function runInit(argv: string[]): Promise<number> {
   }
   saveConfig(config);
   trustRepo(root);
+  snapshotTree(root); // warms the snapshot index so the first session starts fast
 
   // Shell alias
   const wantAlias =
