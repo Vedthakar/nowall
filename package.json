@@ -6,7 +6,9 @@
   "bin": {
     "nowall": "dist/cli.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -17,7 +19,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "stress": "npm run build && node scripts/stress.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
