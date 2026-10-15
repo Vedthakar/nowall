@@ -127,3 +127,8 @@ Local observations come from reading key names and shapes only. No real session 
 | R8 | Moat | Easy to copy | Ship fast; win on trust (local-only, checkpoints, verified reconciliation) | Strategic |
 
 Everything else in the locked table holds: TypeScript/npm distribution (all target CLIs except `agy` and Cursor are npm or curl; Node is fine), the hybrid journal + git + reconciliation design, wrapper-triggered handoff, checkpoints, and zero hosting.
+
+### Decisions taken (2026-10-15, Ved)
+
+- **R1:** Antigravity CLI (`agy`) replaces Gemini CLI as the v0.1 Google adapter. Gemini CLI (API key) moves to the roadmap.
+- **R2:** The free fallback is **own-key only**. Users bring their own provider key (OpenRouter, DeepSeek, Kimi, GLM) through Qwen Code or OpenCode. We don't depend on any hosted free tier. Off by default; the China consent screen still applies.
