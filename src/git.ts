@@ -49,7 +49,8 @@ export function snapshotTree(root: string): string {
     const real = join(gitDir, "index");
     if (existsSync(real)) copyFileSync(real, index);
     const env = { GIT_INDEX_FILE: index };
-    git(root, ["add", "-A", "--", ".", ":!.handoff"], env);
+    git(root, ["add", "-A", "--", "."], env);
+    git(root, ["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", ".handoff"], env);
     return git(root, ["write-tree"], env);
   } finally {
     rmSync(dir, { recursive: true, force: true });
