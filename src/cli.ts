@@ -337,10 +337,18 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-main(process.argv.slice(2)).then(
-  (code) => process.exit(code),
-  (err: unknown) => {
-    process.stderr.write(`nowall: ${err instanceof Error ? err.message : String(err)}\n`);
-    process.exit(1);
-  },
-);
+/** Exit only after stdout/stderr are flushed; process.exit() alone truncates piped output. */
+function exitAfterFlush(code: number): void {
+  let pending = 2;
+  const done = () => {
+    pending -= 1;
+    if (pending === 0) process.exit(code);
+  };
+  process.stdout.write("", done);
+  process.stderr.write("", done);
+}
+
+main(process.argv.slice(2)).then(exitAfterFlush, (err: unknown) => {
+  process.stderr.write(`nowall: ${err instanceof Error ? err.message : String(err)}\n`);
+  exitAfterFlush(1);
+});

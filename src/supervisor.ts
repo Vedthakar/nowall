@@ -64,6 +64,13 @@ function takeCheckpoint(root: string, session: Session, label: string) {
   return cp;
 }
 
+const MAX_DISPLAY = 20_000;
+/** Keeps a runaway single message from flooding the terminal (the agent's own log keeps it all). */
+const clip = (s: string) =>
+  s.length > MAX_DISPLAY
+    ? `${s.slice(0, MAX_DISPLAY)}… [${s.length - MAX_DISPLAY} more characters not shown]`
+    : s;
+
 const dim = (s: string) => (process.stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
 
 /**
@@ -175,7 +182,7 @@ export async function runHeadlessTurn(
           result.sessionId = ev.id;
           break;
         case "text":
-          deps.out(`${sanitizeTerminal(redact(ev.text))}\n`);
+          deps.out(`${sanitizeTerminal(redact(clip(ev.text)))}\n`);
           break;
         case "tool":
           deps.out(
