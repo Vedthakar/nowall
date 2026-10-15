@@ -1,4 +1,5 @@
-import { isAbsolute, relative } from "node:path";
+import { realpathSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { lastLimitFromTranscript } from "./adapters/claude.js";
 import { repoRoot } from "./git.js";
 import { JOURNAL_RULE } from "./prompt.js";
@@ -31,7 +32,7 @@ export function handleHook(
   const root = repoRoot(cwd);
   if (!root || !isInitialized(root)) return "";
   const sid = env.NOWALL_SID ?? loadSession(root)?.sid ?? "manual";
-  const rel = (p: string) => (isAbsolute(p) ? relative(root, p) : p);
+  const rel = (p: string) => (isAbsolute(p) ? relative(root, realish(p)) : p);
 
   switch (name) {
     case "session-start":
@@ -93,5 +94,15 @@ export function handleHook(
     }
     default:
       return "";
+  }
+}
+
+/** realpath that also works for files that don't exist yet (resolves the nearest existing parent). */
+function realish(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    const parent = dirname(p);
+    return parent === p ? p : join(realish(parent), basename(p));
   }
 }
