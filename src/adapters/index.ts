@@ -1,6 +1,7 @@
 import { constants, accessSync, realpathSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import type { AgentId } from "../schemas.js";
+import { loadConfig } from "../state.js";
 import { claude } from "./claude.js";
 import { codex } from "./codex.js";
 import { antigravity, cursor, qwen } from "./others.js";
@@ -10,11 +11,17 @@ export const ADAPTERS: Record<AgentId, AgentAdapter> = { claude, codex, cursor, 
 
 /**
  * Finds the real binary on PATH, skipping anything that resolves to nowall itself
- * (so a `claude` shim pointing at us can never recurse).
+ * (so a `claude` shim pointing at us can never recurse). Also searches the shell PATH saved by
+ * `nowall setup`: background processes (the notch, launchd, GUI apps' hooks) get a bare PATH
+ * that misses ~/.local/bin, Homebrew, nvm and friends.
  */
 export function resolveBinary(name: string, self?: string): string | null {
   const selfReal = self ? safeReal(self) : null;
-  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+  const dirs = [
+    ...(process.env.PATH ?? "").split(delimiter),
+    ...(loadConfig().path ?? "").split(delimiter),
+  ];
+  for (const dir of new Set(dirs)) {
     if (!dir) continue;
     const candidate = join(dir, name);
     try {

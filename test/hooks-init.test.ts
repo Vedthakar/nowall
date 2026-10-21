@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { ADAPTERS } from "../src/adapters/index.js";
+import { ADAPTERS, resolveBinary } from "../src/adapters/index.js";
 import { sanitizeTerminal } from "../src/fsafe.js";
 import { handleHook, hookSid, launchTakeover, trustedRoot } from "../src/hooks.js";
 import { installAlias, stripBlock } from "../src/init.js";
@@ -23,7 +23,7 @@ import {
   readJournal,
   signalPath,
 } from "../src/session.js";
-import { loadState, saveConfig, trustRepo } from "../src/state.js";
+import { loadState, saveConfig, saveState, trustRepo } from "../src/state.js";
 import { sh, tempRepo } from "./helpers.js";
 
 const NOW = new Date("2026-10-15T18:00:00Z");
@@ -225,5 +225,49 @@ describe("sanitizeTerminal", () => {
     const evil =
       "ok\x1b]0;pwned\x07 \x1b[2J\x1b[31mred\x1b[0m\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\\x07\x00\nnext\ttab";
     expect(sanitizeTerminal(evil)).toBe("ok redlink\nnext\ttab");
+  });
+});
+
+describe("real-world fixes", () => {
+  it("an agent that is visibly working loses its stale cooldown", () => {
+    const repo = initRepo();
+    saveState({
+      v: 1,
+      agents: {
+        claude: {
+          cooldownUntil: "2026-10-22T23:00:00.000Z",
+          lastLimit: {
+            window: "spend",
+            message: "monthly spend limit",
+            observedAt: "2026-10-15T10:00:00Z",
+          },
+        },
+      },
+    });
+    handleHook(
+      "post-tool",
+      "claude",
+      { cwd: repo, tool_name: "Bash", tool_input: { command: "ls" } },
+      {},
+      NOW,
+    );
+    expect(Date.parse(loadState().agents.claude?.cooldownUntil ?? "")).toBeLessThanOrEqual(
+      NOW.getTime(),
+    );
+    expect(loadState().agents.claude?.lastLimit?.window).toBe("spend"); // history kept
+  });
+
+  it("finds agent CLIs on the shell PATH saved at setup, even from a bare background PATH", () => {
+    const bin = mkdtempSync(join(tmpdir(), "nowall-localbin-"));
+    writeFileSync(join(bin, "cursor-agent"), "#!/bin/sh\n", { mode: 0o755 });
+    const original = process.env.PATH;
+    process.env.PATH = "/usr/bin:/bin";
+    try {
+      expect(resolveBinary("cursor-agent")).toBeNull();
+      saveConfig({ ...DEFAULT_CONFIG, takeover: "off", path: `/opt/none:${bin}` });
+      expect(resolveBinary("cursor-agent")).toBe(join(bin, "cursor-agent"));
+    } finally {
+      process.env.PATH = original;
+    }
   });
 });

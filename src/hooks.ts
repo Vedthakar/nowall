@@ -127,6 +127,7 @@ export function handleHook(
     }
 
     case "post-tool": {
+      clearCooldownIfWorking(agent, now);
       const tool = String(input.tool_name ?? (input.file_path ? "Edit" : ""));
       const ti = (input.tool_input ?? {}) as Json;
       const file = [ti.file_path, ti.path, ti.notebook_path, input.file_path].find(
@@ -191,6 +192,18 @@ export function handleHook(
     default:
       return "";
   }
+}
+
+/**
+ * A tool call only completes after the model answered, so the agent isn't limited right now:
+ * drop any cooldown we recorded (e.g. the user raised their spend limit or bought more usage).
+ */
+export function clearCooldownIfWorking(agent: AgentId, now: Date): void {
+  const state = loadState();
+  const s = state.agents[agent];
+  if (!s?.cooldownUntil || Date.parse(s.cooldownUntil) <= now.getTime()) return;
+  state.agents[agent] = { ...s, cooldownUntil: now.toISOString() };
+  saveState(state);
 }
 
 function takeoverArgs(cli: string, sid: string, agent: AgentId): string[] {
