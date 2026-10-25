@@ -29,10 +29,10 @@
     "lint": "biome check .",
     "format": "biome format --write .",
     "stress": "npm run build && node scripts/stress.mjs",
-    "prepack": "npm run build && npm run build:notch",
     "prepublishOnly": "npm run lint && npm run typecheck && npm test",
     "build:notch": "sh scripts/build-notch.sh",
-    "install:local": "npm install -g \"$(npm pack --silent | tail -1)\""
+    "install:local": "npm install -g \"$(npm pack --silent --pack-destination \"${TMPDIR:-/tmp}\" | tail -1 | sed \"s#^#${TMPDIR:-/tmp}/#\")\"",
+    "prepare": "npm run build && npm run build:notch"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

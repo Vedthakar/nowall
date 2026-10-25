@@ -17,7 +17,7 @@ if [ "$major" -lt 20 ]; then
 fi
 
 # NOWALL_SOURCE lets you install from a tarball or git URL instead of the npm registry.
-src="${NOWALL_SOURCE:-nowall}"
+src="${NOWALL_SOURCE:-github:Vedthakar/nowall}"
 say "Installing nowall from $src..."
 npm install -g "$src" >/dev/null
 

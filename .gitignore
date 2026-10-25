@@ -33,3 +33,6 @@ fixtures/private/
 
 # macOS notch build output
 notch/build/
+
+# npm pack output
+*.tgz
