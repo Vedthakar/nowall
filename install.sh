@@ -16,8 +16,9 @@ if [ "$major" -lt 20 ]; then
   exit 1
 fi
 
-# NOWALL_SOURCE lets you install from a tarball or git URL instead of the npm registry.
-src="${NOWALL_SOURCE:-github:Vedthakar/nowall}"
+# Installs the prebuilt release (CLI + universal macOS notch; no build tools needed).
+# NOWALL_SOURCE overrides it, e.g. a local tarball.
+src="${NOWALL_SOURCE:-https://github.com/Vedthakar/nowall/releases/latest/download/nowall.tgz}"
 say "Installing nowall from $src..."
 npm install -g "$src" >/dev/null
 

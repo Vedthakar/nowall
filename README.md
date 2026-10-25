@@ -1,8 +1,14 @@
 # nowall
 
-**Stay in the tools you already use. We handle the wall.**
+**A tiny macOS notch that shows what Claude Code is doing, plus automatic failover: when Claude hits its usage limit mid-task, your Cursor account finishes the job.**
 
-You work in Claude Code like always, in the desktop app or the terminal. When it hits its usage limit mid-task, nowall quietly hands the work to the next coding agent you have (Cursor, Codex, Antigravity) with the full context of what was being built. No pop-ups and nothing to type. A small black notch at the top-right of your screen shows what's happening, and when the job is done you get one summary:
+<p align="center">
+  <img src="docs/images/notch-collapsed.png" alt="nowall notch, collapsed" height="260">
+  &nbsp;&nbsp;
+  <img src="docs/images/notch-expanded.png" alt="nowall notch, expanded on hover" height="260">
+</p>
+
+You keep working in Claude Code as usual (desktop app or terminal). A small black notch on the right edge of your screen shows what's happening: Claude working, needs your input, done. Hover it for details. If Claude hits its limit, nowall quietly hands the task to Cursor (or Codex or Antigravity) with the full context, and you get one summary when it's finished:
 
 ```
 Your task is done. The last part was built by Cursor because Claude Code hit its session limit (resets 11:59 PM).
@@ -13,25 +19,45 @@ Your task is done. The last part was built by Cursor because Claude Code hit its
 
 Runs entirely on your computer. No account, no server, and nowall never touches your credentials.
 
-## Install (one command)
+## Status: early, but it works
+
+I built this for myself at a hackathon. The full flow has run for real: Claude hit its monthly limit mid-task and Cursor finished it (14 files). It has 150 tests, a security review ([docs/SECURITY.md](docs/SECURITY.md)) and a stress suite.
+
+| Works today | Not yet |
+|---|---|
+| macOS (Apple Silicon and Intel) | Windows/Linux notch (failover itself works on Linux) |
+| Claude Code (desktop app or CLI) → Cursor | Codex and Antigravity are supported but less tested |
+| Silent takeover, checkpoints, `nowall undo` | Proactive handoff before the limit |
+
+Bugs and ideas are welcome in [issues](https://github.com/Vedthakar/nowall/issues), and PRs even more so.
+
+## Install
+
+You need Node 20+ and macOS. Then:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Vedthakar/nowall/main/install.sh | sh
 ```
 
-The installer:
-- Installs the CLI.
-- Finds your agents on its own (terminal CLIs and the Claude desktop app).
-- Hooks into Claude Code, Cursor and Codex once, which covers every project.
-- Starts the notch.
+That installs the prebuilt package (no build tools needed). It finds your agents on its own, hooks into Claude Code and Cursor once (which covers every project), and starts the notch.
 
-The only thing it can't do for you is sign in to an agent. It tells you the exact command, such as `cursor-agent login`.
-
-Already have Node 20+? This does the same thing:
+The only thing it can't do is sign in for you. If Cursor isn't signed in yet:
 
 ```bash
-npm i -g nowall && nowall setup
+cursor-agent login
 ```
+
+Prefer to see what you're running first? Install the release package directly with npm, then run setup:
+
+```bash
+npm install -g https://github.com/Vedthakar/nowall/releases/latest/download/nowall.tgz
+```
+
+```bash
+nowall setup
+```
+
+Change your mind? `nowall uninstall --global` removes everything.
 
 ### Or let Claude install it
 

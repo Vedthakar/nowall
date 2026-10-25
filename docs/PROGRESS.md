@@ -1,6 +1,6 @@
 # Progress
 
-Last updated 2026-10-15.
+Last updated 2026-10-24.
 
 ## v0.1 build (brief §4, Phase 3)
 - [x] Scaffold, CI (lint, typecheck, tests, notch build), gitleaks hook + Action
@@ -33,7 +33,7 @@ Last updated 2026-10-15.
 - [x] Real Claude Code 2.1.295 accepts nowall's hook config; SessionStart and prompt hooks fire and journal correctly
 - [x] Real Claude's auth-failure output captured and handled
 - [x] Real Cursor CLI (2026.07.09): expired-login state detected correctly
-- [ ] **Full real failover (Claude → Cursor).** Blocked on Ved: run `cursor-agent login`. Real Claude usage limits can't be triggered on demand, so the trigger itself is covered by fixtures that match real transcripts.
+- [x] **Full real failover (Claude → Cursor), 2026-10-20.** Claude hit its monthly spend limit mid-task in a real project; nowall took over silently in the background and Cursor finished it (14 files, +320/−36), with checkpoints and a summary.
 
 ## Not yet verified
 - Cursor's exact usage-limit message (generic detection is in place)
