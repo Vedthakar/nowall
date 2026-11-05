@@ -79,10 +79,18 @@ All in `src/schemas.ts` as TS types with runtime guards.
 
 **Config** (`~/.config/nowall/config.json`):
 ```ts
-{ v:1, order:["claude","codex","cursor","antigravity"], enabled:{...}, yolo:false,
+{ v:1, order:["claude","claude:work","codex","cursor","antigravity"],   // account ids
+  accounts?: [{ id:"claude:work", agent:"claude", label:"work",
+                env?: { CLAUDE_CONFIG_DIR: "~/.config/nowall/profiles/claude-work" },   // profile agents
+                secret?: { env:"CURSOR_API_KEY", store:"keychain"|"file" } }],         // key agents
+  enabled:{...}, yolo:false,
   stop:{ maxTurns:30, maxMinutes:120, noDiffTurns:3 }, defaultCooldownMinutes:300,
   fallback:{ enabled:false, chinaConsent:false, provider?: "openrouter"|"deepseek"|"kimi"|"glm" } }
 ```
+
+**Accounts** (`src/accounts.ts`). An account id is `<agent>` (the agent's own login) or `<agent>:<label>`. Extra accounts are *not* stored logins: Claude and Codex get an empty profile directory that the user signs in to once (`claude auth login` / `codex login` with `CLAUDE_CONFIG_DIR` / `CODEX_HOME` set), and nowall only ever sets that variable when it runs the agent. Cursor keeps one login per machine, so a second Cursor account is an API key the user types in (hidden prompt), kept in the macOS Keychain (`security add-generic-password -s nowall -a <id>`; `NOWALL_SECRET_STORE=file` or non-macOS → `~/.config/nowall/secrets/<id>`, 0600) and passed only as `CURSOR_API_KEY`. `state.agents` is keyed by account id, so cooldowns are per account. Hooks attribute an event to an account by matching the agent's env vars (`accountFromEnv`): a limit in `CLAUDE_CONFIG_DIR=…/claude-work claude` cools down `claude:work` only. `agents.json` carries `accounts[]` (one entry per account, in order, `active` when in `order`) next to `agents[]`; the notch draws one icon per account.
+
+**Cursor IDE chats.** Cursor's user-level hooks (`~/.cursor/hooks.json`) run with cwd `~/.cursor`; the repo comes from `workspace_roots[0]` (or `CURSOR_PROJECT_DIR`). All six lifecycle events are installed (`sessionStart`, `beforeSubmitPrompt`, `afterFileEdit`, `afterShellExecution`, `stop`, `sessionEnd`). Cursor also runs Claude-format hooks from `~/.claude/settings.json`, so the same event arrives a second time as `--agent claude`; `handleHook` recognises Cursor-shaped payloads (`conversation_id`, `workspace_roots`, camelCase `hook_event_name`) and ignores that copy.
 
 ## 4. Wrapper and supervisor
 
@@ -93,7 +101,7 @@ All in `src/schemas.ts` as TS types with runtime guards.
   3. **Text patterns** per adapter (`limits.ts`), run on stream text and stderr.
   4. **Exit code**, last, and only combined with 2 or 3.
 - **Transient vs quota:** Claude's `429 … temporary capacity` and `Server is temporarily limiting` are **not** limit hits. We retry the same agent with backoff (max 2) before failing over.
-- **Next agent:** `config.order` filtered by `enabled && installed && signedIn !== false && (cooldownUntil ?? 0) < now`, skipping the agent that just failed. If none is left, stop and report the earliest reset.
+- **Next account:** `config.order` (account ids) filtered by `enabled[agent] && installed && signedIn !== false && (cooldownUntil ?? 0) < now`, skipping the account that just failed. The headless child gets that account's env (`accountEnv`) on top of the current one. If none is left, stop and report the earliest reset.
 - **Stop conditions** (checked after every turn): `tasks.json` has no `todo`, OR no change in `git diff` hash for `noDiffTurns` turns, OR `maxTurns`, OR `maxMinutes`, OR all agents cooling down, OR user `Ctrl-C`.
 - **Checkpoint before every handoff:** snapshot the working tree (tracked + untracked, respecting `.gitignore`) with a temporary `GIT_INDEX_FILE` → `write-tree` → `commit-tree -p HEAD` → `update-ref refs/heads/nowall/<sid>/<n>`. **It never touches the user's branch, index, or working tree.** `nowall undo [n]` restores files from a checkpoint.
 

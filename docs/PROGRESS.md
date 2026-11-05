@@ -1,6 +1,16 @@
 # Progress
 
-Last updated 2026-10-24.
+Last updated 2026-11-05.
+
+## Multi-session, accounts, rings (2026-11-05)
+- [x] Fixed: Cursor IDE chats never showed in the notch. User-level Cursor hooks run from `~/.cursor`, so the repo was wrong; now taken from `workspace_roots` / `CURSOR_PROJECT_DIR`. All six Cursor lifecycle events are hooked (start, prompt, edit, shell, stop, end), so a chat shows while it loads and when it finishes.
+- [x] Fixed: Cursor chats that did get through were labelled "Claude" (Cursor also runs Claude-format hooks; the duplicate copy is now ignored).
+- [x] Notch shows one animated glyph per session running at the same time (up to 4, then "+n"); sessions silent for 30 min are treated as idle.
+- [x] Usage rings on every account icon: outer = week, inner = short window (Claude 5h / Codex window), orange past 85%. Cooldown ring unchanged.
+- [x] Accounts: `nowall account add claude|codex <label>` (own profile dir + the agent's own login), `nowall account add cursor <label> --api-key` (Keychain / 0600 file). Per-account cooldowns, failover across accounts, hooks attribute limits to the right account. `nowall order` and the notch's Settings window (drag or arrows, tick to include) edit the takeover order.
+- [x] Fallback verified with fake agents: Claude → Codex → Cursor, Claude → Antigravity → Qwen, Claude → Claude (work) → Cursor (API key).
+- [ ] Claude usage rings need a terminal Claude Code turn (status line); the desktop app never reports usage. Cursor has no usage % to show.
+- [ ] A takeover *from* a Cursor chat (Cursor hits its limit in the IDE) is not wired: Cursor's `stop` hook has no limit information.
 
 ## v0.1 build (brief §4, Phase 3)
 - [x] Scaffold, CI (lint, typecheck, tests, notch build), gitleaks hook + Action
@@ -37,5 +47,7 @@ Last updated 2026-10-24.
 
 ## Not yet verified
 - Cursor's exact usage-limit message (generic detection is in place)
-- Antigravity's headless output (not installed here)
+- Antigravity's headless output (not installed here; chain verified with a fake agent only)
 - Codex `exec resume` flag order (not installed here)
+- A real second Claude account through `CLAUDE_CONFIG_DIR` (the mechanism is Anthropic-documented; verified with fake agents)
+- A real second Cursor account through `CURSOR_API_KEY` (the Cursor CLI here is not signed in)
