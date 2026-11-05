@@ -17,6 +17,7 @@ const failures = [];
 const env = {
   ...process.env,
   NOWALL_HOME: mkdtempSync(join(tmpdir(), "nowall-stress-home-")),
+  NOWALL_NO_LAUNCHD: "1", // never touch the user's live notch
   GIT_AUTHOR_NAME: "S",
   GIT_AUTHOR_EMAIL: "s@x.invalid",
   GIT_COMMITTER_NAME: "S",

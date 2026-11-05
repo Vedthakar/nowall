@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
@@ -11,7 +12,39 @@ import { type AgentInfo, claudeUsagePath, refreshAgents } from "./agents.js";
 import { shq, writeAtomic } from "./fsafe.js";
 import { configDir, loadConfig, saveConfig } from "./state.js";
 
-const LABEL = "dev.nowall.notch";
+const BASE_LABEL = "dev.nowall.notch";
+
+/** The user's real config folder, independent of a redirected $HOME (tests set HOME to a temp dir). */
+function realDefaultHome(): string {
+  let base = homedir();
+  try {
+    base = userInfo().homedir || base;
+  } catch {
+    // no passwd entry (containers): fall back to $HOME
+  }
+  return join(base, ".config", "nowall");
+}
+
+/**
+ * launchd label for the notch that reads `home`: the plain label for the real config folder, and
+ * `dev.nowall.notch.<hash>` for any other NOWALL_HOME, so a sandboxed run can never address the
+ * user's live notch.
+ */
+export function notchLabel(home = configDir()): string {
+  if (home === realDefaultHome()) return BASE_LABEL;
+  return `${BASE_LABEL}.${createHash("sha1").update(home).digest("hex").slice(0, 8)}`;
+}
+
+/** `pgrep -f` / `pkill -f` pattern for the notch process that reads `home`, and no other. */
+export function notchPattern(home = configDir()): string {
+  const escaped = home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return `NowallNotch\\.app/Contents/MacOS/NowallNotch .*--home ${escaped}( |$)`;
+}
+
+/** Set by the test runner and the stress script: never call launchctl, pgrep or pkill. */
+function noLaunchd(): boolean {
+  return process.env.NOWALL_NO_LAUNCHD === "1";
+}
 
 export const GLOBAL_CONSENT = `nowall keeps your coding agents going when one hits its usage limit.
 Everything runs on this computer. No account, no server, no telemetry.
@@ -44,7 +77,7 @@ function notchApp(): string | null {
 }
 
 function plistPath(home = homedir()): string {
-  return join(home, "Library", "LaunchAgents", `${LABEL}.plist`);
+  return join(home, "Library", "LaunchAgents", `${notchLabel()}.plist`);
 }
 
 function cliPath(): string {
@@ -72,10 +105,8 @@ const xml = (s: string) =>
 
 /** True while a notch process is running (from launchd or opened directly). */
 export function notchRunning(): boolean {
-  return (
-    spawnSync("pgrep", ["-f", "NowallNotch.app/Contents/MacOS/NowallNotch"], { stdio: "ignore" })
-      .status === 0
-  );
+  if (noLaunchd()) return false;
+  return spawnSync("pgrep", ["-f", notchPattern()], { stdio: "ignore" }).status === 0;
 }
 
 function sleepSync(ms: number): void {
@@ -102,6 +133,7 @@ export function tempHomeProblem(): string | null {
 
 /** Installs (or refreshes) the login item that keeps the notch running, starts it, and verifies it. */
 export function startNotch(home = homedir()): string {
+  if (noLaunchd()) return "Notch skipped (NOWALL_NO_LAUNCHD).";
   if (process.platform !== "darwin") {
     return "The notch is macOS-only for now (Windows/Linux are on the roadmap).";
   }
@@ -109,6 +141,7 @@ export function startNotch(home = homedir()): string {
   if (!app) return "Notch app not found in this build (it is built on macOS with Xcode tools).";
   const problem = tempHomeProblem();
   if (problem) return `Notch not started: ${problem}`;
+  const label = notchLabel();
   const args = [
     "--node",
     process.execPath,
@@ -121,7 +154,7 @@ export function startNotch(home = homedir()): string {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>${LABEL}</string>
+  <key>Label</key><string>${label}</string>
   <key>ProgramArguments</key>
   <array>
 ${[app, ...args].map((a) => `    <string>${xml(a)}</string>`).join("\n")}
@@ -137,10 +170,10 @@ ${[app, ...args].map((a) => `    <string>${xml(a)}</string>`).join("\n")}
   // Restart cleanly. `bootout` is asynchronous: bootstrapping before the old job is gone fails.
   const domain = `gui/${process.getuid?.() ?? ""}`;
   const loaded = () =>
-    spawnSync("launchctl", ["print", `${domain}/${LABEL}`], { stdio: "ignore" }).status === 0;
-  spawnSync("launchctl", ["bootout", `${domain}/${LABEL}`], { stdio: "ignore" });
+    spawnSync("launchctl", ["print", `${domain}/${label}`], { stdio: "ignore" }).status === 0;
+  spawnSync("launchctl", ["bootout", `${domain}/${label}`], { stdio: "ignore" });
   waitFor(() => !loaded(), 5000);
-  spawnSync("pkill", ["-f", "NowallNotch.app/Contents/MacOS/NowallNotch"], { stdio: "ignore" });
+  spawnSync("pkill", ["-f", notchPattern()], { stdio: "ignore" });
   let error = "";
   for (let attempt = 0; attempt < 3 && !loaded(); attempt++) {
     const r = spawnSync("launchctl", ["bootstrap", domain, plistPath(home)], { encoding: "utf8" });
@@ -158,18 +191,30 @@ ${[app, ...args].map((a) => `    <string>${xml(a)}</string>`).join("\n")}
   return `The notch failed to start${error ? ` (${error})` : ""}. Run \`nowall notch\` from Terminal.app; if it still fails, run \`nowall notch status\` and share the output.`;
 }
 
+/**
+ * Unloads and quits the notch that reads the current config folder. Only ever addresses this
+ * folder's own launchd label and process (see `notchLabel`/`notchPattern`); under
+ * NOWALL_NO_LAUNCHD or a temporary NOWALL_HOME it just removes the plist.
+ */
 export function stopNotch(home = homedir()): void {
   if (process.platform !== "darwin") return;
-  const uid = String(process.getuid?.() ?? "");
-  spawnSync("launchctl", ["bootout", `gui/${uid}/${LABEL}`], { stdio: "ignore" });
   rmSync(plistPath(home), { force: true });
-  spawnSync("pkill", ["-f", "NowallNotch.app/Contents/MacOS/NowallNotch"], { stdio: "ignore" });
+  if (noLaunchd()) return;
+  const problem = tempHomeProblem();
+  if (problem) {
+    process.stderr.write(`Notch left alone: ${problem}\n`);
+    return;
+  }
+  const uid = String(process.getuid?.() ?? "");
+  spawnSync("launchctl", ["bootout", `gui/${uid}/${notchLabel()}`], { stdio: "ignore" });
+  spawnSync("pkill", ["-f", notchPattern()], { stdio: "ignore" });
 }
 
 /** `nowall notch status`: what's installed, where it reads from, and whether it's running. */
 export function notchStatus(home = homedir()): string {
   const lines: string[] = [];
   lines.push(`App:         ${notchApp() ?? "not in this build"}`);
+  lines.push(`Label:       ${notchLabel()}`);
   lines.push(`Login item:  ${existsSync(plistPath(home)) ? plistPath(home) : "not installed"}`);
   if (existsSync(plistPath(home))) {
     const text = readFileSync(plistPath(home), "utf8");
