@@ -32,9 +32,9 @@ function world(plan: Record<string, unknown[]>, config?: Record<string, unknown>
   const scratch = mkdtempSync(join(tmpdir(), "nowall-e2e-"));
   const bin = join(scratch, "bin");
   mkdirSync(bin);
-  for (const name of ["claude", "codex", "cursor-agent"]) {
+  for (const name of ["claude", "codex", "cursor-agent", "agy", "qwen"]) {
     const shim = join(bin, name);
-    const agent = name === "cursor-agent" ? "cursor" : name;
+    const agent = { "cursor-agent": "cursor", agy: "antigravity" }[name] ?? name;
     // --version / status calls from detect() must succeed quickly.
     writeFileSync(
       shim,
@@ -43,6 +43,7 @@ case "$1" in
   --version) echo "fake-${agent} 0.0.0"; exit 0;;
   login) exit 0;;
   status) echo '{"isAuthenticated":true}'; exit 0;;
+  auth) echo "{\\"loggedIn\\":true,\\"configDirectory\\":\\"\${CLAUDE_CONFIG_DIR:-default}\\"}"; exit 0;;
 esac
 exec "${process.execPath}" "${FAKE}" ${agent} "$@"
 `,
@@ -82,7 +83,9 @@ function run(w: World): { stdout: string; stderr: string; status: number | null 
   return { stdout: r.stdout, stderr: r.stderr, status: r.status };
 }
 
-function calls(w: World): { name: string; n: number; args: string[] }[] {
+function calls(
+  w: World,
+): { name: string; n: number; args: string[]; account: Record<string, unknown> }[] {
   const p = `${w.plan}.calls.jsonl`;
   return existsSync(p)
     ? readFileSync(p, "utf8")
@@ -162,7 +165,8 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
     // Claude is cooling down until its parsed reset.
     const state = JSON.parse(readFileSync(join(w.env.NOWALL_HOME as string, "state.json"), "utf8"));
     expect(state.agents.claude.lastLimit.window).toBe("session");
-    expect(state.agents.claude.cooldownUntil).toMatch(/T03:59:00\.000Z$/);
+    // 11:59pm Toronto is 03:59Z during DST and 04:59Z otherwise.
+    expect(state.agents.claude.cooldownUntil).toMatch(/T0[34]:59:00\.000Z$/);
 
     // Journal has mechanical + model-written lines, and the limit.
     const journal = readFileSync(join(w.repo, ".handoff/journal.jsonl"), "utf8");
@@ -192,6 +196,100 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
     const cursorPrompt = calls(w).find((c) => c.name === "cursor")?.args[1] ?? "";
     expect(cursorPrompt).toContain("Codex was working on it");
     expect(cursorPrompt).toContain("src/part2.ts");
+  });
+
+  it("chains Claude → Antigravity → Qwen (own-key fallback) when enabled", () => {
+    const w = world(
+      {
+        claude: [CLAUDE_LIMITED],
+        antigravity: [
+          {
+            files: { "src/part2.ts": "// 2\n" },
+            limit: "You have reached your usage limit for this model. Try again later.",
+          },
+        ],
+        qwen: [{ text: "All done.", files: { "src/part3.ts": "// 3\n" }, tasks: done(["a", "b"]) }],
+      },
+      {
+        order: ["claude", "antigravity", "qwen"],
+        enabled: { claude: true, antigravity: true, qwen: true },
+        fallback: { enabled: true, chinaConsent: true },
+      },
+    );
+    const r = run(w);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(
+      "The last part was built by Qwen Code because Antigravity hit its usage limit",
+    );
+    expect(r.stdout).toMatch(/1\. Claude Code: .*hit session limit/);
+    expect(r.stdout).toMatch(/2\. Antigravity: .*hit usage limit/);
+    expect(r.stdout).toMatch(/3\. Qwen Code: .*finished/);
+    const c = calls(w);
+    expect(c.find((x) => x.name === "antigravity")?.args.slice(0, 1)).toEqual(["-p"]);
+    const qwen = c.find((x) => x.name === "qwen");
+    expect(qwen?.args.join(" ")).toContain("--approval-mode auto-edit");
+    expect(qwen?.args[1]).toContain("Antigravity was working on it");
+  });
+
+  it("falls through a second Claude account and a keyed Cursor account", () => {
+    const w = world(
+      {
+        claude: [
+          CLAUDE_LIMITED,
+          {
+            files: { "src/part2.ts": "// 2\n" },
+            limit: "You've hit your session limit · resets 10pm (America/Toronto)",
+          },
+        ],
+        cursor: [
+          { text: "All done.", files: { "src/part3.ts": "// 3\n" }, tasks: done(["a", "b"]) },
+        ],
+      },
+      {
+        order: ["claude", "claude:work", "cursor:b"],
+        accounts: [
+          { id: "claude:work", agent: "claude", label: "work", env: { CLAUDE_CONFIG_DIR: "" } },
+          {
+            id: "cursor:b",
+            agent: "cursor",
+            label: "b",
+            secret: { env: "CURSOR_API_KEY", store: "file" },
+          },
+        ],
+      },
+    );
+    // Point the work profile at a real directory and store the Cursor key the way `account add` does.
+    const home = w.env.NOWALL_HOME as string;
+    const profile = join(home, "profiles", "claude-work");
+    mkdirSync(profile, { recursive: true });
+    const cfg = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+    cfg.accounts[0].env.CLAUDE_CONFIG_DIR = profile;
+    writeFileSync(join(home, "config.json"), JSON.stringify(cfg));
+    mkdirSync(join(home, "secrets"));
+    writeFileSync(join(home, "secrets", "cursor_b"), "key_SECRET\n");
+
+    const r = run(w);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain(
+      "The last part was built by Cursor (b) because Claude Code (work) hit its session limit",
+    );
+    expect(r.stdout).toMatch(/1\. Claude Code: .*hit session limit/);
+    expect(r.stdout).toMatch(/2\. Claude Code \(work\): .*hit session limit/);
+    expect(r.stdout).toMatch(/3\. Cursor \(b\): .*finished/);
+
+    // Each account was selected through the agent's own environment, never by nowall touching logins.
+    const c = calls(w);
+    const claude = c.filter((x) => x.name === "claude");
+    expect(claude[0]?.account.CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(claude.at(-1)?.account.CLAUDE_CONFIG_DIR).toBe(profile);
+    expect(c.find((x) => x.name === "cursor")?.account.CURSOR_API_KEY).toBe(true);
+    expect(r.stdout).not.toContain("key_SECRET");
+
+    // Cooldowns are per account.
+    const state = JSON.parse(readFileSync(join(home, "state.json"), "utf8"));
+    expect(state.agents.claude.cooldownUntil).toBeTruthy();
+    expect(state.agents["claude:work"].cooldownUntil).toBeTruthy();
+    expect(state.agents["cursor:b"]).toBeUndefined();
   });
 
   it("reprompts the same agent session until tasks are done", () => {
@@ -235,7 +333,7 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
       { order: ["claude", "codex"] },
     );
     const r = run(w);
-    expect(r.stdout).toContain("every agent is at its limit; Codex resets");
+    expect(r.stdout).toContain("every account is at its limit; Codex resets");
     expect(r.stdout).toContain("Paused: every available agent is at its usage limit.");
   });
 

@@ -80,7 +80,11 @@ describe("pickNext", () => {
     }
     s.agents.codex = { cooldownUntil: "2026-10-15T19:00:00Z" };
     expect(pickNext(DEFAULT_CONFIG, s, ALL, [], NOW)).toBeNull();
-    expect(earliestReset(s, NOW)).toEqual({ agent: "codex", at: "2026-10-15T19:00:00Z" });
+    expect(earliestReset(s, NOW)).toEqual({
+      account: "codex",
+      agent: "codex",
+      at: "2026-10-15T19:00:00Z",
+    });
   });
 });
 

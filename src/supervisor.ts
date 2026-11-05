@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
 import { createInterface } from "node:readline";
+import { accountEnv, accountName, allAccounts } from "./accounts.js";
 import type { AgentAdapter } from "./adapters/types.js";
 import { readJsonSafe, sanitizeTerminal } from "./fsafe.js";
 import { checkpoint, shortStat, snapshotTree } from "./git.js";
@@ -8,9 +9,16 @@ import { isAuthError } from "./limits.js";
 import { buildPacket } from "./packet.js";
 import { agentName, continuePrompt, masterPrompt } from "./prompt.js";
 import { loadEnvValues, redact } from "./redact.js";
-import type { AgentId, Config, LimitHit } from "./schemas.js";
+import {
+  type AccountId,
+  type AgentId,
+  type Config,
+  type LimitHit,
+  accountAgent,
+} from "./schemas.js";
 import {
   type LimitSignal,
+  type Segment,
   type Session,
   type StopReason,
   appendJournal,
@@ -30,6 +38,11 @@ export interface Deps {
   adapters: Record<AgentId, AgentAdapter>;
   /** Resolved binaries of agents that are installed (and not known to be signed out). */
   binaries: Partial<Record<AgentId, string>>;
+  /**
+   * Accounts that may take over. Absent: every configured account whose agent has a binary.
+   * The CLI narrows it to accounts whose login checked out.
+   */
+  accounts?: ReadonlySet<AccountId>;
   config: Config;
   now: () => Date;
   out: (s: string) => void;
@@ -138,6 +151,7 @@ export async function runHeadlessTurn(
   bin: string,
   prompt: string,
   resumeId: string | undefined,
+  account: AccountId = adapter.id,
 ): Promise<TurnResult> {
   const opts = resumeId
     ? { prompt, resumeId, yolo: deps.config.yolo }
@@ -148,6 +162,7 @@ export async function runHeadlessTurn(
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      ...accountEnv(deps.config, account), // profile dir or API key that selects this login
       ...env,
       NOWALL_SID: session.sid,
       NOWALL_AGENT: adapter.id,
@@ -234,29 +249,38 @@ export async function runHeadlessTurn(
   return result;
 }
 
-function available(deps: Deps): Set<AgentId> {
-  return new Set((Object.keys(deps.binaries) as AgentId[]).filter((id) => deps.binaries[id]));
+/** Accounts that can take over right now: configured, agent binary present, login not ruled out. */
+function available(deps: Deps): Set<AccountId> {
+  const out = new Set<AccountId>();
+  for (const a of allAccounts(deps.config)) {
+    if (!deps.binaries[a.agent]) continue;
+    if (deps.accounts && !deps.accounts.has(a.id)) continue;
+    out.add(a.id);
+  }
+  return out;
 }
 
 /**
- * Hands off from `from` (which just hit `limit`) and supervises headless agents until a stop
- * condition. Every handoff is checkpointed; returns why it stopped.
+ * Hands off from `from` (the account that just hit `limit`) and supervises headless agents until a
+ * stop condition. Every handoff is checkpointed; returns why it stopped.
  */
 export async function failover(
   deps: Deps,
   session: Session,
-  from: AgentId,
+  from: AccountId,
   limit: LimitHit,
 ): Promise<StopReason> {
   const startMs = deps.now().getTime();
   const envValues = loadEnvValues(deps.root);
-  let current: AgentId = from;
+  let current: AccountId = from;
   let currentLimit = limit;
   let turns = 0;
   let skippedForAuth = false;
   let cp = { ref: "", commit: session.baseCommit };
+  const dropped = new Set<AccountId>();
 
   for (;;) {
+    const currentAgent = accountAgent(current) ?? "claude";
     // 1. Record the limit and close the segment that hit it (not again after an auth skip).
     if (!skippedForAuth) {
       saveState(
@@ -272,7 +296,7 @@ export async function failover(
       closeSegment(session, "limit", cp.commit, currentLimit, deps.now());
       appendJournal(deps.root, {
         sid: session.sid,
-        agent: current,
+        agent: currentAgent,
         kind: "limit",
         text: currentLimit.message,
       });
@@ -281,14 +305,17 @@ export async function failover(
 
     // 2. Choose who continues.
     const state = loadState();
-    const next = pickNext(deps.config, state, available(deps), [current], deps.now());
+    const candidates = available(deps);
+    for (const id of dropped) candidates.delete(id);
+    const next = pickNext(deps.config, state, candidates, [current], deps.now());
     if (!next) {
       const er = earliestReset(state, deps.now());
       deps.out(
-        `\nnowall: every agent is at its limit${er ? `; ${agentName(er.agent)} resets ${fmtTime(er.at)}` : ""}.\n`,
+        `\nnowall: every account is at its limit${er ? `; ${accountName(er.account)} resets ${fmtTime(er.at)}` : ""}.\n`,
       );
       return finish(deps, session, "all-limited");
     }
+    const nextAgent = accountAgent(next) ?? "claude";
 
     // 3. Build the packet and launch the next agent with the master prompt.
     const packet = buildPacket({
@@ -296,30 +323,37 @@ export async function failover(
       sid: session.sid,
       baseCommit: session.baseCommit,
       checkpoint: cp,
-      from: current,
-      to: next,
+      from: currentAgent,
+      to: nextAgent,
       limit: currentLimit,
       now: deps.now(),
       envValues,
     });
     appendJournal(deps.root, {
       sid: session.sid,
-      agent: next,
+      agent: nextAgent,
       kind: "handoff",
       text: `${current} -> ${next}`,
     });
-    session.segments.push({ agent: next, mode: "headless", startedAt: deps.now().toISOString() });
+    const segment: Segment = {
+      agent: nextAgent,
+      mode: "headless",
+      startedAt: deps.now().toISOString(),
+    };
+    if (next !== nextAgent) segment.account = next;
+    session.segments.push(segment);
     saveSession(deps.root, session);
     updateStatus(session.sid, deps.root, {
-      agent: next,
+      agent: nextAgent,
+      ...(next !== nextAgent ? { account: next } : {}),
       phase: "working",
-      detail: `Taking over from ${agentName(current)}`,
+      detail: `Taking over from ${accountName(current)}`,
       shares: agentShares(deps.root, session),
     });
-    deps.out(dim(`\n── continuing in ${agentName(next)} ──\n`));
+    deps.out(dim(`\n── continuing in ${accountName(next)} ──\n`));
 
-    const adapter = deps.adapters[next];
-    const bin = deps.binaries[next] as string;
+    const adapter = deps.adapters[nextAgent];
+    const bin = deps.binaries[nextAgent] as string;
     let prompt = masterPrompt(packet);
     let resumeId: string | undefined;
     let lastTree = snapshotTree(deps.root);
@@ -330,7 +364,7 @@ export async function failover(
 
     while (!handedOff) {
       turns += 1;
-      const r = await runHeadlessTurn(deps, session, adapter, bin, prompt, resumeId);
+      const r = await runHeadlessTurn(deps, session, adapter, bin, prompt, resumeId, next);
       if (r.sessionId) {
         resumeId = r.sessionId;
         const seg = session.segments.at(-1);
@@ -340,9 +374,9 @@ export async function failover(
       if (r.interrupted) return finish(deps, session, "interrupted");
 
       if (r.authError) {
-        // Not signed in: drop this agent for the rest of the run and try the next one.
-        const a = deps.adapters[next];
-        const notice = `${a.displayName} isn't signed in. Run: ${a.loginHint}`;
+        // Not signed in: drop this account for the rest of the run and try the next one.
+        const a = deps.adapters[nextAgent];
+        const notice = `${accountName(next)} isn't signed in. Run: ${a.loginHint}`;
         session.notices = [...new Set([...(session.notices ?? []), notice])];
         closeSegment(
           session,
@@ -352,9 +386,13 @@ export async function failover(
           deps.now(),
         );
         saveSession(deps.root, session);
-        delete deps.binaries[next];
-        deps.out(dim(`  ${notice}. Trying the next agent.\n`));
-        updateStatus(session.sid, deps.root, { agent: next, phase: "handing-off", detail: notice });
+        dropped.add(next);
+        deps.out(dim(`  ${notice}. Trying the next account.\n`));
+        updateStatus(session.sid, deps.root, {
+          agent: nextAgent,
+          phase: "handing-off",
+          detail: notice,
+        });
         skippedForAuth = true;
         handedOff = true;
         continue;
@@ -387,7 +425,7 @@ export async function failover(
       const tasks = readTasks(deps.root);
       if (tasks) {
         updateStatus(session.sid, deps.root, {
-          agent: next,
+          agent: nextAgent,
           phase: "working",
           tasks: {
             done: tasks.tasks.filter((t) => t.status === "done").length,

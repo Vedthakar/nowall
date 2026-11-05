@@ -28,7 +28,8 @@ export interface AgentAdapter {
   loginHint: string;
   /** "beta" = flags/format not yet verified against a real install. */
   maturity: "stable" | "beta";
-  detect(run: Runner, binaryPath: string): Promise<Detection>;
+  /** `env` selects an account (profile dir or API key); absent means the default login. */
+  detect(run: Runner, binaryPath: string, env?: Record<string, string>): Promise<Detection>;
   headless(opts: HeadlessOptions): { args: string[]; env?: Record<string, string> };
   parseLine(line: string): AgentEvent[];
   /** Classify error-channel text (error events, is_error results, stderr). */
@@ -45,18 +46,32 @@ export type Runner = (
   cmd: string,
   args: string[],
   timeoutMs?: number,
+  env?: Record<string, string>,
 ) => Promise<{ code: number; stdout: string; stderr: string }>;
 
-export const defaultRunner: Runner = (cmd, args, timeoutMs = 5000) =>
+export const defaultRunner: Runner = (cmd, args, timeoutMs, env) =>
   new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, encoding: "utf8" }, (err, stdout, stderr) => {
-      const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
-      resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "" });
-    });
+    execFile(
+      cmd,
+      args,
+      {
+        timeout: timeoutMs ?? 5000,
+        encoding: "utf8",
+        env: env ? { ...process.env, ...env } : undefined,
+      },
+      (err, stdout, stderr) => {
+        const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
+        resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "" });
+      },
+    );
   });
 
-export async function versionOf(run: Runner, bin: string): Promise<string | null> {
-  const r = await run(bin, ["--version"]);
+export async function versionOf(
+  run: Runner,
+  bin: string,
+  env?: Record<string, string>,
+): Promise<string | null> {
+  const r = await run(bin, ["--version"], undefined, env);
   if (r.code !== 0) return null;
   return (r.stdout || r.stderr).trim().split("\n")[0]?.slice(0, 80) ?? "";
 }

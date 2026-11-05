@@ -16,7 +16,13 @@ const counter = `${planPath}.${name}.count`;
 const n = existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0;
 writeFileSync(counter, String(n + 1));
 const turn = plan[name]?.[n] ?? { text: "Nothing left to do." };
-appendFileSync(`${planPath}.calls.jsonl`, `${JSON.stringify({ name, n, args })}\n`);
+// Which account nowall selected: profile dirs are logged as-is, the API key only as present/absent.
+const account = {
+  CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  CODEX_HOME: process.env.CODEX_HOME,
+  CURSOR_API_KEY: Boolean(process.env.CURSOR_API_KEY),
+};
+appendFileSync(`${planPath}.calls.jsonl`, `${JSON.stringify({ name, n, args, account })}\n`);
 
 const cwd = process.cwd();
 const headless = args.includes("-p") || args[0] === "exec";

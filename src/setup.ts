@@ -4,9 +4,10 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
+import { accountFromEnv, accountName } from "./accounts.js";
 import { isOurs, mergeHooksFile, withHooks } from "./adapters/common.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
-import { type AgentInfo, refreshAgents } from "./agents.js";
+import { type AgentInfo, claudeUsagePath, refreshAgents } from "./agents.js";
 import { shq, writeAtomic } from "./fsafe.js";
 import { configDir, loadConfig, saveConfig } from "./state.js";
 
@@ -237,9 +238,11 @@ export async function runSetup(argv: string[]): Promise<number> {
     process.stdout.write(`${startNotch(home)}\n`);
   }
 
-  const order = config.order.filter((id) => snap.agents.find((a) => a.id === id)?.installed);
+  const order = snap.accounts.filter(
+    (a) => a.active && snap.agents.find((x) => x.id === a.agent)?.installed,
+  );
   process.stdout.write(
-    `\nnowall is on. Takeover order: ${order.map((id) => ADAPTERS[id].displayName).join(" → ")}.\n`,
+    `\nnowall is on. Takeover order: ${order.map((a) => accountName(a.id)).join(" → ")}.\n`,
   );
   if (ready.length === 0) {
     process.stdout.write(
@@ -278,12 +281,16 @@ export function runTeardown(): number {
   return 0;
 }
 
-/** `nowall statusline`: Claude Code pipes its status JSON here; we keep the usage numbers, print nothing. */
-export function runStatusline(raw: string): number {
+/**
+ * `nowall statusline`: Claude Code pipes its status JSON here; we keep the usage numbers, print
+ * nothing. Runs inside Claude's environment, so CLAUDE_CONFIG_DIR tells us which account it is.
+ */
+export function runStatusline(raw: string, env: NodeJS.ProcessEnv = process.env): number {
   try {
     const input = JSON.parse(raw) as { rate_limits?: unknown };
     if (input.rate_limits && typeof input.rate_limits === "object") {
-      writeAtomic(join(configDir(), "claude-usage.json"), `${JSON.stringify(input.rate_limits)}\n`);
+      const account = accountFromEnv("claude", env);
+      writeAtomic(claudeUsagePath(account), `${JSON.stringify(input.rate_limits)}\n`);
     }
   } catch {
     // never disturb Claude's UI

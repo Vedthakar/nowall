@@ -13,7 +13,7 @@ import {
 import { join } from "node:path";
 import { appendSafe, readSmall, readTail } from "./fsafe.js";
 import { redact } from "./redact.js";
-import type { AgentId, JournalLine, LimitWindow, TaskList } from "./schemas.js";
+import type { AccountId, AgentId, JournalLine, LimitWindow, TaskList } from "./schemas.js";
 import { isTaskList } from "./schemas.js";
 import { readJson, writeJson } from "./state.js";
 
@@ -58,6 +58,8 @@ export const SID_RE = /^[sc]_[A-Za-z0-9-]{1,64}$/;
 
 export interface Segment {
   agent: AgentId;
+  /** Which login of the agent did this part; absent means the agent's default account. */
+  account?: AccountId;
   mode: "interactive" | "headless";
   startedAt: string;
   endedAt?: string;
@@ -219,6 +221,7 @@ export function signalPath(root: string, sid: string): string {
 
 export interface LimitSignal {
   agent: AgentId;
+  account?: AccountId;
   sid: string;
   window: LimitWindow;
   message: string;

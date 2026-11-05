@@ -6,6 +6,24 @@ export function isAgentId(value: unknown): value is AgentId {
   return typeof value === "string" && (AGENT_IDS as readonly string[]).includes(value);
 }
 
+export const ACCOUNT_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$/;
+
+/** The agent behind an account id ("claude:work" → "claude"), or null if it isn't one. */
+export function accountAgent(id: unknown): AgentId | null {
+  if (typeof id !== "string") return null;
+  const i = id.indexOf(":");
+  const agent = i < 0 ? id : id.slice(0, i);
+  const label = i < 0 ? "" : id.slice(i + 1);
+  if (!isAgentId(agent)) return null;
+  if (i >= 0 && !ACCOUNT_LABEL_RE.test(label)) return null;
+  return agent;
+}
+
+export function accountLabel(id: string): string {
+  const i = id.indexOf(":");
+  return i < 0 ? "" : id.slice(i + 1);
+}
+
 /** Which limit window was hit, when the message tells us. */
 export type LimitWindow =
   | "session"
@@ -79,14 +97,35 @@ export interface AgentState {
   lastLimit?: { window: LimitWindow; message: string; resetsAt?: string; observedAt: string };
 }
 
+/**
+ * An account is one login of one agent. The default account of an agent has the agent's id
+ * ("claude"); extra accounts are "<agent>:<label>" ("claude:work"). Limits, cooldowns and the
+ * takeover order are all per account.
+ */
+export type AccountId = string;
+
+export interface Account {
+  id: AccountId;
+  agent: AgentId;
+  label: string;
+  /** Environment that selects this login, e.g. CLAUDE_CONFIG_DIR or CODEX_HOME (a profile dir). */
+  env?: Record<string, string>;
+  /** A secret the user handed to nowall (Cursor API key), kept in the Keychain or a 0600 file. */
+  secret?: { env: string; store: "keychain" | "file" };
+}
+
 export interface State {
   v: 1;
-  agents: Partial<Record<AgentId, AgentState>>;
+  /** Keyed by account id. */
+  agents: Partial<Record<AccountId, AgentState>>;
 }
 
 export interface Config {
   v: 1;
-  order: AgentId[];
+  /** Takeover priority: account ids, first is tried first. Accounts not listed are off. */
+  order: AccountId[];
+  /** Extra logins beyond each agent's default one. */
+  accounts?: Account[];
   enabled: Partial<Record<AgentId, boolean>>;
   yolo: boolean;
   stop: { maxTurns: number; maxMinutes: number; noDiffTurns: number };

@@ -50,6 +50,7 @@ export async function runDemo(): Promise<number> {
 case "$1" in
   --version) echo "simulated ${agent}"; exit 0;;
   status) echo '{"isAuthenticated":true}'; exit 0;;
+  auth) echo '{"loggedIn":true}'; exit 0;;
 esac
 exec "${process.execPath}" "${fake}" ${agent} "$@"
 `,

@@ -1,9 +1,9 @@
 import { join } from "node:path";
+import { accountName } from "./accounts.js";
 import { ADAPTERS } from "./adapters/index.js";
 import { sanitizeTerminal, writeAtomic } from "./fsafe.js";
 import { shortStat } from "./git.js";
-import { agentName } from "./prompt.js";
-import type { Session, StopReason } from "./session.js";
+import type { Segment, Session, StopReason } from "./session.js";
 import { handoffDir } from "./session.js";
 import { fmtTime } from "./supervisor.js";
 
@@ -28,6 +28,9 @@ const WINDOW: Record<string, string> = {
   unknown: "usage limit",
 };
 
+/** "Claude Code", or "Claude Code (work)" when the part ran as an extra account. */
+const who = (s: Segment) => accountName(s.account ?? s.agent);
+
 /** The one message the user sees at the end: who built what, and why we switched. */
 export function renderSummary(root: string, session: Session): string {
   const reason = session.finished?.reason ?? "complete";
@@ -39,7 +42,7 @@ export function renderSummary(root: string, session: Session): string {
   const prev = worked.at(-2);
   if (last && prev?.endReason === "limit" && prev.limit) {
     const reset = prev.limit.resetsAt ? ` (resets ${fmtTime(prev.limit.resetsAt)})` : "";
-    lines[0] += ` The last part was built by ${agentName(last.agent)} because ${agentName(prev.agent)} hit its ${WINDOW[prev.limit.window] ?? "usage limit"}${reset}.`;
+    lines[0] += ` The last part was built by ${who(last)} because ${who(prev)} hit its ${WINDOW[prev.limit.window] ?? "usage limit"}${reset}.`;
   }
 
   if (segs.length > 1) {
@@ -54,7 +57,7 @@ export function renderSummary(root: string, session: Session): string {
           : s.endReason === "auth"
             ? "not signed in, skipped"
             : "finished";
-      lines.push(`  ${i + 1}. ${agentName(s.agent)}: ${stat || "no file changes"} (${why})`);
+      lines.push(`  ${i + 1}. ${who(s)}: ${stat || "no file changes"} (${why})`);
     });
     lines.push("");
     lines.push(

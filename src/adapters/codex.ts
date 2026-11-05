@@ -55,10 +55,10 @@ export const codex: AgentAdapter = {
   loginHint: "codex login",
   maturity: "beta",
 
-  async detect(run, bin) {
-    const version = await versionOf(run, bin);
+  async detect(run, bin, env) {
+    const version = await versionOf(run, bin, env);
     if (version === null) return { installed: false, signedIn: false };
-    const status = await run(bin, ["login", "status"]);
+    const status = await run(bin, ["login", "status"], undefined, env);
     return { installed: true, version, signedIn: status.code === 0 };
   },
 

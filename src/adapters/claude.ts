@@ -13,10 +13,19 @@ export const claude: AgentAdapter = {
   loginHint: "claude  (then /login)",
   maturity: "stable",
 
-  async detect(run, bin) {
-    const version = await versionOf(run, bin);
+  async detect(run, bin, env) {
+    const version = await versionOf(run, bin, env);
     if (version === null) return { installed: false, signedIn: false };
-    // No documented non-interactive auth check; credentials are never read by us.
+    // `claude auth status --json` (2.1+) says whether this profile is logged in; it never prints
+    // credentials. Older versions don't have it: then we just don't know.
+    const r = await run(bin, ["auth", "status", "--json"], 15_000, env);
+    try {
+      const s = JSON.parse(r.stdout) as { loggedIn?: boolean };
+      if (typeof s.loggedIn === "boolean")
+        return { installed: true, version, signedIn: s.loggedIn };
+    } catch {
+      // not supported or not JSON
+    }
     return { installed: true, version, signedIn: "unknown" };
   },
 

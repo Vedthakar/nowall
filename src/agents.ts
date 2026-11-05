@@ -1,10 +1,11 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { accountEnv, accountName, allAccounts } from "./accounts.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { type Runner, defaultRunner } from "./adapters/types.js";
 import { readJsonSafe, readTail, writeAtomic } from "./fsafe.js";
-import { AGENT_IDS, type AgentId } from "./schemas.js";
+import { AGENT_IDS, type AccountId, type AgentId } from "./schemas.js";
 import { configDir, loadConfig, loadState } from "./state.js";
 
 export interface UsageWindow {
@@ -28,10 +29,27 @@ export interface AgentInfo {
   installHint: string;
 }
 
+/** One login of one agent, as the notch shows it: one icon per account, in takeover order. */
+export interface AccountInfo {
+  id: AccountId;
+  agent: AgentId;
+  /** "Claude Code (work)"; the default account is just the agent's name. */
+  name: string;
+  label: string;
+  signedIn: boolean | "unknown";
+  /** In the takeover order (accounts left out are off). */
+  active: boolean;
+  cooldownUntil?: string;
+  limitMessage?: string;
+  usage?: UsageWindow[];
+}
+
 export interface AgentsSnapshot {
   v: 1;
   updatedAt: string;
   agents: AgentInfo[];
+  /** Every account in priority order (those in `order` first, `active: true`), then the rest. */
+  accounts: AccountInfo[];
 }
 
 export function agentsPath(): string {
@@ -48,8 +66,8 @@ function claudeDesktopInstalled(): boolean {
 }
 
 /** Latest Codex rate-limit windows from its newest rollout log (~/.codex/sessions/Y/M/D/rollout-*.jsonl). */
-export function codexUsage(home = homedir()): UsageWindow[] | undefined {
-  const root = join(home, ".codex", "sessions");
+export function codexUsage(home = homedir(), codexHome?: string): UsageWindow[] | undefined {
+  const root = join(codexHome ?? join(home, ".codex"), "sessions");
   const newest = (dir: string): string | null => {
     try {
       const names = readdirSync(dir).sort();
@@ -104,12 +122,21 @@ export function codexUsage(home = homedir()): UsageWindow[] | undefined {
   return undefined;
 }
 
+/** Where `nowall statusline` keeps Claude's last usage numbers, per account. */
+export function claudeUsagePath(account: AccountId = "claude"): string {
+  const suffix = account === "claude" ? "" : `-${account.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+  return join(configDir(), `claude-usage${suffix}.json`);
+}
+
 /** Claude's 5-hour/weekly usage as last seen by `nowall statusline` (only when Claude runs it). */
-export function claudeUsage(now = new Date()): UsageWindow[] | undefined {
+export function claudeUsage(
+  now = new Date(),
+  account: AccountId = "claude",
+): UsageWindow[] | undefined {
   const saved = readJsonSafe<{
     five_hour?: { used_percentage?: number; resets_at?: number };
     seven_day?: { used_percentage?: number; resets_at?: number };
-  }>(join(configDir(), "claude-usage.json"));
+  }>(claudeUsagePath(account));
   if (!saved) return undefined;
   const out: UsageWindow[] = [];
   for (const [key, label] of [
@@ -171,7 +198,46 @@ export async function refreshAgents(
       return info;
     }),
   );
-  const snapshot: AgentsSnapshot = { v: 1, updatedAt: now.toISOString(), agents };
+
+  // Accounts: the default one reuses its agent's detection; extras are checked in their own env.
+  const accounts = await Promise.all(
+    allAccounts(config).map(async (a): Promise<AccountInfo> => {
+      const agent = agents.find((x) => x.id === a.agent) as AgentInfo;
+      const info: AccountInfo = {
+        id: a.id,
+        agent: a.agent,
+        name: accountName(a.id),
+        label: a.label,
+        signedIn: agent.signedIn,
+        active: config.order.includes(a.id) && agent.enabled,
+      };
+      const env = accountEnv(config, a.id);
+      if (a.id !== a.agent) {
+        const bin = resolveBinary(ADAPTERS[a.agent].binary, process.argv[1]);
+        const cached = fresh ? prev?.accounts?.find((x) => x.id === a.id) : undefined;
+        if (!bin) info.signedIn = false;
+        else if (cached) info.signedIn = cached.signedIn;
+        else if (a.secret && !env[a.secret.env])
+          info.signedIn = false; // key missing
+        else info.signedIn = (await ADAPTERS[a.agent].detect(run, bin, env)).signedIn;
+      }
+      const s = state.agents[a.id];
+      if (s?.cooldownUntil && Date.parse(s.cooldownUntil) > now.getTime()) {
+        info.cooldownUntil = s.cooldownUntil;
+        if (s.lastLimit?.message) info.limitMessage = s.lastLimit.message;
+      }
+      const usage =
+        a.agent === "codex"
+          ? codexUsage(homedir(), env.CODEX_HOME)
+          : a.agent === "claude"
+            ? claudeUsage(now, a.id)
+            : undefined;
+      if (usage) info.usage = usage;
+      return info;
+    }),
+  );
+
+  const snapshot: AgentsSnapshot = { v: 1, updatedAt: now.toISOString(), agents, accounts };
   writeAtomic(agentsPath(), `${JSON.stringify(snapshot, null, 2)}\n`);
   return snapshot;
 }

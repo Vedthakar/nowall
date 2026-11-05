@@ -1,15 +1,30 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
+import {
+  KEY_ENV,
+  accountEnv,
+  accountFromEnv,
+  accountName,
+  addAccount,
+  allAccounts,
+  profilePath,
+  removeAccount,
+  setOrder,
+  supportsExtraAccounts,
+  validLabel,
+} from "./accounts.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
-import { refreshAgents } from "./agents.js";
+import { type AgentsSnapshot, agentsPath, refreshAgents } from "./agents.js";
 import { runDemo } from "./demo.js";
+import { readJsonSafe } from "./fsafe.js";
 import { checkpoint, listCheckpoints, repoRoot, restore } from "./git.js";
 import { handleHook, trustedRoot } from "./hooks.js";
 import { runInit, runUninstall } from "./init.js";
 import { agentName } from "./prompt.js";
-import { AGENT_IDS, type AgentId, isAgentId } from "./schemas.js";
+import { AGENT_IDS, type AgentId, accountAgent, isAgentId } from "./schemas.js";
 import {
   acquireLock,
   appendJournal,
@@ -44,6 +59,9 @@ Usage:
   nowall demo                 watch a simulated failover (no real agents, no usage)
   nowall logs [-f]            what a background takeover did (or is doing) in this repo
   nowall agents               which agents nowall found, sign-in, cooldowns, usage
+  nowall account add <agent> <label>   add a second login (claude, codex: own profile; cursor: API key)
+  nowall account list|remove <id>      list accounts, or forget one
+  nowall order [id ...]       show or set the takeover priority (e.g. claude claude:work cursor)
   nowall notch [on|off|status] show or hide the macOS notch (off is remembered)
   nowall note --task "..." [--status done|todo] | --decision "..."
   nowall uninstall [--global]  remove this repo's hooks (or, with --global, everything setup added)
@@ -80,18 +98,32 @@ function flag(args: string[], name: string): string | undefined {
   return i >= 0 ? args[i + 1] : undefined;
 }
 
-async function availableBinaries(): Promise<Deps["binaries"]> {
+/**
+ * Binaries of enabled agents, and the accounts whose login checked out (or couldn't be checked).
+ * An extra account is only offered when its own profile or key is signed in.
+ */
+async function availableAccounts(): Promise<Pick<Deps, "binaries" | "accounts">> {
   const config = loadConfig();
-  const out: Deps["binaries"] = {};
+  const binaries: Deps["binaries"] = {};
+  const accounts = new Set<string>();
   await Promise.all(
-    AGENT_IDS.filter((id) => config.enabled[id]).map(async (id) => {
-      const bin = resolveBinary(ADAPTERS[id].binary, process.argv[1]);
-      if (!bin) return;
-      const d = await ADAPTERS[id].detect(defaultRunner, bin);
-      if (d.installed && d.signedIn !== false) out[id] = bin;
-    }),
+    allAccounts(config)
+      .filter((a) => config.enabled[a.agent] && config.order.includes(a.id))
+      .map(async (a) => {
+        const bin = resolveBinary(ADAPTERS[a.agent].binary, process.argv[1]);
+        if (!bin) return;
+        const env = accountEnv(config, a.id);
+        const d = await ADAPTERS[a.agent].detect(
+          defaultRunner,
+          bin,
+          a.id === a.agent ? undefined : env,
+        );
+        if (!d.installed || d.signedIn === false) return;
+        binaries[a.agent] = bin;
+        accounts.add(a.id);
+      }),
   );
-  return out;
+  return { binaries, accounts };
 }
 
 async function cmdRun(argv: string[]): Promise<number> {
@@ -154,9 +186,10 @@ async function cmdRun(argv: string[]): Promise<number> {
     return exitCode;
   }
 
-  deps.binaries = await availableBinaries();
+  Object.assign(deps, await availableAccounts());
   const hit = { kind: "quota" as const, window: limit.window, message: limit.message };
-  await failover(deps, session, agent, limit.resetsAt ? { ...hit, resetsAt: limit.resetsAt } : hit);
+  const from = limit.account ?? accountFromEnv(agent, process.env);
+  await failover(deps, session, from, limit.resetsAt ? { ...hit, resetsAt: limit.resetsAt } : hit);
   process.stdout.write(`\n${writeSummary(root, loadSession(root) ?? session)}\n`);
   return 0;
 }
@@ -164,11 +197,11 @@ async function cmdRun(argv: string[]): Promise<number> {
 /** Continues a session whose agent nowall didn't launch (opened in a new Terminal by the hook). */
 async function cmdTakeover(argv: string[]): Promise<number> {
   const root = trustedRoot(process.cwd());
-  const from = flag(argv, "--from");
+  const from = flag(argv, "--from") ?? "";
   const session = root ? loadSession(root) : null;
   if (
     !root ||
-    !isAgentId(from) ||
+    !accountAgent(from) ||
     !session ||
     session.sid !== flag(argv, "--sid") ||
     session.finished
@@ -191,14 +224,14 @@ async function cmdTakeover(argv: string[]): Promise<number> {
   const deps: Deps = {
     root,
     adapters: ADAPTERS,
-    binaries: await availableBinaries(),
     config: loadConfig(),
     now: () => new Date(),
     out: (s) => process.stdout.write(s),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+    ...(await availableAccounts()),
   };
   process.stdout.write(
-    `${agentName(from)} hit its usage limit in ${root}.\nnowall is continuing the work here. Leave the ${agentName(from)} session paused until this finishes.\n`,
+    `${accountName(from)} hit its usage limit in ${root}.\nnowall is continuing the work here. Leave the ${accountName(from)} session paused until this finishes.\n`,
   );
   await failover(
     deps,
@@ -262,21 +295,24 @@ function cmdNote(argv: string[]): number {
 
 async function cmdStatus(): Promise<number> {
   const state = loadState();
+  const config = loadConfig();
   const now = new Date();
-  process.stdout.write("Agents:\n");
-  for (const id of AGENT_IDS) {
-    const a = ADAPTERS[id];
+  process.stdout.write("Accounts (takeover order):\n");
+  for (const acc of allAccounts(config)) {
+    const a = ADAPTERS[acc.agent];
     const bin = resolveBinary(a.binary, process.argv[1]);
-    const d = bin ? await a.detect(defaultRunner, bin) : { installed: false, signedIn: false };
-    const until = state.agents[id]?.cooldownUntil;
+    const env = acc.id === acc.agent ? undefined : accountEnv(config, acc.id);
+    const d = bin ? await a.detect(defaultRunner, bin, env) : { installed: false, signedIn: false };
+    const until = state.agents[acc.id]?.cooldownUntil;
     const cooling =
       until && Date.parse(until) > now.getTime() ? `cooling down until ${fmtTime(until)}` : "";
     const signed =
       d.signedIn === "unknown" ? "" : d.signedIn ? "signed in" : `not signed in (${a.loginHint})`;
+    const off = config.order.includes(acc.id) ? "" : "off (not in order)";
     const info = d.installed
-      ? [signed, cooling, a.maturity === "beta" ? "beta" : ""].filter(Boolean).join(", ")
+      ? [signed, cooling, off, a.maturity === "beta" ? "beta" : ""].filter(Boolean).join(", ")
       : `not installed (${a.installHint})`;
-    process.stdout.write(`  ${a.displayName.padEnd(12)} ${info}\n`);
+    process.stdout.write(`  ${accountName(acc.id).padEnd(22)} ${info}\n`);
   }
   const root = repoRoot(process.cwd());
   const s = root ? loadSession(root) : null;
@@ -292,6 +328,145 @@ async function cmdStatus(): Promise<number> {
       process.stdout.write(`  ${c.ref.split("/").pop()}  ${c.subject}\n`);
     }
   }
+  return 0;
+}
+
+/** Reads a secret from the terminal without echoing it. */
+async function askHidden(question: string): Promise<string> {
+  if (!process.stdin.isTTY) return "";
+  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+  const mute = rl as unknown as { _writeToOutput: (s: string) => void };
+  const original = mute._writeToOutput.bind(rl);
+  mute._writeToOutput = (s: string) => {
+    if (s.includes(question)) original(question);
+  };
+  try {
+    const answer = await rl.question(question);
+    process.stdout.write("\n");
+    return answer.trim();
+  } finally {
+    rl.close();
+  }
+}
+
+function printAccounts(): void {
+  const config = loadConfig();
+  const snap = readJsonSafe<AgentsSnapshot>(agentsPath());
+  process.stdout.write("Accounts, in takeover order (first is tried first):\n");
+  allAccounts(config).forEach((a, i) => {
+    const on = config.order.includes(a.id);
+    const info = snap?.accounts?.find((x) => x.id === a.id);
+    const signed =
+      info?.signedIn === false ? "not signed in" : info?.signedIn === true ? "signed in" : "";
+    const where = a.env ? Object.values(a.env)[0] : a.secret ? `API key (${a.secret.store})` : "";
+    process.stdout.write(
+      `  ${on ? `${i + 1}.` : " -"} ${a.id.padEnd(20)} ${accountName(a.id).padEnd(24)} ${[on ? "" : "off", signed, where].filter(Boolean).join("  ")}\n`,
+    );
+  });
+  process.stdout.write(
+    "\nReorder: nowall order <id> <id> ...   Add: nowall account add <claude|codex|cursor> <label>\n",
+  );
+}
+
+/** `nowall account add|remove|list`: extra logins, each in its own profile or with its own key. */
+async function cmdAccount(argv: string[]): Promise<number> {
+  const [sub, agentArg, label] = argv;
+  if (sub === undefined || sub === "list" || sub === "ls") {
+    printAccounts();
+    return 0;
+  }
+  if (sub === "remove" || sub === "rm") {
+    const removed = agentArg ? removeAccount(agentArg) : null;
+    if (!removed) {
+      process.stderr.write(`nowall account remove: no extra account "${agentArg ?? ""}".\n`);
+      return 1;
+    }
+    const dir = profilePath(removed);
+    process.stdout.write(
+      `Removed ${accountName(removed.id)} from nowall.${dir ? ` Its login stays in ${dir}; delete that folder to log it out.` : ""}\n`,
+    );
+    return 0;
+  }
+  if (sub !== "add" || !isAgentId(agentArg) || !label) {
+    process.stderr.write(
+      "usage: nowall account add <claude|codex|cursor> <label> [--api-key <key>] | remove <id> | list\n",
+    );
+    return 2;
+  }
+  if (!supportsExtraAccounts(agentArg)) {
+    process.stderr.write(`${agentName(agentArg)} doesn't support extra accounts yet.\n`);
+    return 1;
+  }
+  if (!validLabel(label)) {
+    process.stderr.write("Label: letters, digits, - or _, up to 24 characters (e.g. work).\n");
+    return 2;
+  }
+  const bin = resolveBinary(ADAPTERS[agentArg].binary, process.argv[1]);
+  if (!bin) {
+    process.stderr.write(
+      `${agentName(agentArg)} is not installed. Install: ${ADAPTERS[agentArg].installHint}\n`,
+    );
+    return 127;
+  }
+  try {
+    if (KEY_ENV[agentArg]) {
+      let key = flag(argv, "--api-key") ?? process.env[KEY_ENV[agentArg] as string] ?? "";
+      if (!key) {
+        process.stdout.write(
+          `Cursor keeps one login per computer, so a second Cursor account uses an API key.\nCreate one while signed in to that account at https://cursor.com/settings (API keys).\nnowall keeps it in your ${process.platform === "darwin" ? "Keychain" : "config folder (0600)"} and only passes it to cursor-agent.\n`,
+        );
+        key = await askHidden("Paste the API key: ");
+      }
+      if (!key) {
+        process.stderr.write("No key given; nothing changed.\n");
+        return 1;
+      }
+      const account = addAccount(agentArg, label, { apiKey: key });
+      process.stdout.write(`Added ${accountName(account.id)} (key in ${account.secret?.store}).\n`);
+    } else {
+      const account = addAccount(agentArg, label);
+      const env = { ...process.env, ...(account.env ?? {}) };
+      const loginArgs = agentArg === "claude" ? ["auth", "login"] : ["login"];
+      process.stdout.write(
+        `Created profile ${profilePath(account)}.\nSign in to the ${label} account now (this login is kept apart from your main one):\n\n`,
+      );
+      if (!argv.includes("--no-login")) {
+        const r = spawnSync(bin, loginArgs, { stdio: "inherit", env });
+        if (r.status !== 0) {
+          process.stdout.write(
+            `\nLogin didn't finish. Run it later with: ${Object.entries(account.env ?? {})
+              .map(([k, v]) => `${k}=${v}`)
+              .join(" ")} ${ADAPTERS[agentArg].binary} ${loginArgs.join(" ")}\n`,
+          );
+        }
+      }
+      process.stdout.write(`\nAdded ${accountName(account.id)}.\n`);
+    }
+  } catch (err) {
+    process.stderr.write(
+      `nowall account add: ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+    return 1;
+  }
+  await refreshAgents(); // so the notch and `nowall agents` see it right away
+  printAccounts();
+  return 0;
+}
+
+/** `nowall order [id ...]`: show or set the takeover priority. */
+async function cmdOrder(argv: string[]): Promise<number> {
+  if (argv.length === 0) {
+    printAccounts();
+    return 0;
+  }
+  try {
+    const config = setOrder(argv);
+    process.stdout.write(`Takeover order: ${config.order.map(accountName).join(" → ")}\n`);
+  } catch (err) {
+    process.stderr.write(`nowall order: ${err instanceof Error ? err.message : String(err)}\n`);
+    return 2;
+  }
+  await refreshAgents();
   return 0;
 }
 
@@ -343,6 +518,11 @@ async function main(argv: string[]): Promise<number> {
       return rest.includes("--global") ? runTeardown() : runUninstall();
     case "setup":
       return runSetup(rest);
+    case "account":
+    case "accounts":
+      return cmdAccount(rest);
+    case "order":
+      return cmdOrder(rest);
     case "agents": {
       const snap = await refreshAgents();
       if (rest.includes("--write")) return 0;

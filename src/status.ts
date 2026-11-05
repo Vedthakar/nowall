@@ -27,6 +27,8 @@ export interface SessionStatus {
   repoName: string;
   phase: Phase;
   agent: AgentId;
+  /** Account id when it isn't the agent's default login. */
+  account?: string;
   detail?: string;
   tasks?: { done: number; total: number };
   /** Lines changed per agent across the session, for the "who built what" bar. */

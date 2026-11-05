@@ -4,12 +4,15 @@ import { join } from "node:path";
 import { readJsonSafe, writeAtomic } from "./fsafe.js";
 import { redactDeep } from "./redact.js";
 import {
+  type Account,
+  type AccountId,
   type AgentId,
   type Config,
   DEFAULT_CONFIG,
   type LimitHit,
   type State,
-  isAgentId,
+  accountAgent,
+  accountLabel,
 } from "./schemas.js";
 
 export function configDir(): string {
@@ -66,16 +69,44 @@ export function saveState(state: State): void {
   writeJson(join(configDir(), "state.json"), redactDeep(state));
 }
 
+/** Extra accounts that are well-formed: id matches "<agent>:<label>" and agrees with its fields. */
+function validAccounts(list: unknown): Account[] {
+  if (!Array.isArray(list)) return [];
+  const out: Account[] = [];
+  for (const a of list as Partial<Account>[]) {
+    if (!a || typeof a.id !== "string") continue;
+    const agent = accountAgent(a.id);
+    const label = accountLabel(a.id);
+    if (!agent || !label || a.agent !== agent || out.some((x) => x.id === a.id)) continue;
+    const acc: Account = { id: a.id, agent, label };
+    if (a.env && typeof a.env === "object") acc.env = { ...a.env };
+    if (a.secret && typeof a.secret.env === "string") acc.secret = a.secret;
+    out.push(acc);
+  }
+  return out;
+}
+
 export function loadConfig(): Config {
   const c = readJson<Partial<Config>>(join(configDir(), "config.json")) ?? {};
-  return {
+  const accounts = validAccounts(c.accounts);
+  const known = (id: string) => {
+    const agent = accountAgent(id);
+    return agent !== null && (id === agent || accounts.some((a) => a.id === id));
+  };
+  const order = (Array.isArray(c.order) ? c.order : DEFAULT_CONFIG.order).filter(
+    (id, i, all): id is AccountId => known(id) && all.indexOf(id) === i,
+  );
+  const config: Config = {
     ...DEFAULT_CONFIG,
     ...c,
-    order: (c.order ?? DEFAULT_CONFIG.order).filter(isAgentId),
+    order,
     enabled: { ...DEFAULT_CONFIG.enabled, ...c.enabled },
     stop: { ...DEFAULT_CONFIG.stop, ...c.stop },
     fallback: { ...DEFAULT_CONFIG.fallback, ...c.fallback },
   };
+  if (accounts.length) config.accounts = accounts;
+  else config.accounts = undefined;
+  return config;
 }
 
 export function saveConfig(config: Config): void {
@@ -85,14 +116,14 @@ export function saveConfig(config: Config): void {
 /** Records a quota hit and sets the cooldown (reset time, else the default backoff). */
 export function recordLimit(
   state: State,
-  agent: AgentId,
+  account: AccountId,
   hit: LimitHit,
   now: Date,
   defaultCooldownMinutes: number,
 ): State {
   const until =
     hit.resetsAt ?? new Date(now.getTime() + defaultCooldownMinutes * 60_000).toISOString();
-  const lastLimit: NonNullable<State["agents"][AgentId]>["lastLimit"] = {
+  const lastLimit: NonNullable<State["agents"][AccountId]>["lastLimit"] = {
     window: hit.window,
     message: hit.message,
     observedAt: now.toISOString(),
@@ -102,40 +133,47 @@ export function recordLimit(
     ...state,
     agents: {
       ...state.agents,
-      [agent]: { ...state.agents[agent], cooldownUntil: until, lastLimit },
+      [account]: { ...state.agents[account], cooldownUntil: until, lastLimit },
     },
   };
 }
 
-export function isCoolingDown(state: State, agent: AgentId, now: Date): boolean {
-  const until = state.agents[agent]?.cooldownUntil;
+export function isCoolingDown(state: State, account: AccountId, now: Date): boolean {
+  const until = state.agents[account]?.cooldownUntil;
   return until !== undefined && Date.parse(until) > now.getTime();
 }
 
-/** Next agent: configured order ∩ enabled ∩ available ∩ not cooling down ∩ not excluded. */
+/**
+ * Next account: configured order ∩ agent enabled ∩ available ∩ not cooling down ∩ not excluded.
+ * `available` holds account ids (an agent id stands for its default account).
+ */
 export function pickNext(
   config: Config,
   state: State,
-  available: ReadonlySet<AgentId>,
-  exclude: readonly AgentId[],
+  available: ReadonlySet<AccountId>,
+  exclude: readonly AccountId[],
   now: Date,
-): AgentId | null {
+): AccountId | null {
   for (const id of config.order) {
-    if (!config.enabled[id] || !available.has(id) || exclude.includes(id)) continue;
-    if (id === "qwen" && !config.fallback.enabled) continue;
+    const agent = accountAgent(id);
+    if (!agent || !config.enabled[agent] || !available.has(id) || exclude.includes(id)) continue;
+    if (agent === "qwen" && !config.fallback.enabled) continue;
     if (isCoolingDown(state, id, now)) continue;
     return id;
   }
   return null;
 }
 
-export function earliestReset(state: State, now: Date): { agent: AgentId; at: string } | null {
-  let best: { agent: AgentId; at: string } | null = null;
+export function earliestReset(
+  state: State,
+  now: Date,
+): { account: AccountId; agent: AgentId; at: string } | null {
+  let best: { account: AccountId; agent: AgentId; at: string } | null = null;
   for (const [id, s] of Object.entries(state.agents)) {
-    if (!isAgentId(id) || !s?.cooldownUntil || Date.parse(s.cooldownUntil) <= now.getTime())
-      continue;
+    const agent = accountAgent(id);
+    if (!agent || !s?.cooldownUntil || Date.parse(s.cooldownUntil) <= now.getTime()) continue;
     if (!best || Date.parse(s.cooldownUntil) < Date.parse(best.at))
-      best = { agent: id, at: s.cooldownUntil };
+      best = { account: id, agent, at: s.cooldownUntil };
   }
   return best;
 }
