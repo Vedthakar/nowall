@@ -2,11 +2,13 @@ import { spawn } from "node:child_process";
 import { constants, chmodSync, closeSync, mkdirSync, openSync, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+import { accountFromEnv } from "./accounts.js";
 import { lastLimitFromTranscript } from "./adapters/claude.js";
+import { CURSOR_EVENTS } from "./adapters/others.js";
 import { shq, writeAtomic } from "./fsafe.js";
 import { checkpoint, excludeLocally, findRepoRoot, repoRoot } from "./git.js";
 import { JOURNAL_RULE } from "./prompt.js";
-import type { AgentId, LimitHit } from "./schemas.js";
+import type { AccountId, AgentId, LimitHit } from "./schemas.js";
 import {
   type LimitSignal,
   SID_RE,
@@ -89,6 +91,33 @@ export function ensureExternalSession(root: string, sid: string, agent: AgentId,
 const HOT = new Set(["prompt", "post-tool", "notification", "stop", "session-end"]);
 
 /**
+ * Directory the hook event is about. Claude and Codex send `cwd`. Cursor sends `workspace_roots`
+ * (and sets CURSOR_PROJECT_DIR) but runs user-level hooks from ~/.cursor, so process.cwd() is
+ * only the last resort.
+ */
+export function hookCwd(input: Json, env: NodeJS.ProcessEnv): string {
+  if (typeof input.cwd === "string" && input.cwd) return input.cwd;
+  const roots = input.workspace_roots;
+  if (Array.isArray(roots) && typeof roots[0] === "string" && roots[0]) return roots[0];
+  for (const key of ["CURSOR_PROJECT_DIR", "CLAUDE_PROJECT_DIR"]) {
+    const v = env[key];
+    if (v) return v;
+  }
+  return process.cwd();
+}
+
+/**
+ * Cursor also runs Claude-format hooks (~/.claude/settings.json), so one Cursor event can reach
+ * nowall twice: once from .cursor/hooks.json as `--agent cursor` and once as `--agent claude`.
+ * Cursor's payloads are recognisable (conversation_id, workspace_roots, camelCase event names).
+ */
+export function isCursorPayload(input: Json): boolean {
+  if (typeof input.conversation_id === "string" || Array.isArray(input.workspace_roots))
+    return true;
+  return typeof input.hook_event_name === "string" && input.hook_event_name in CURSOR_EVENTS;
+}
+
+/**
  * Handles `nowall hook <name>` invoked by an agent's hook system. Must never throw and must
  * print nothing unless the event uses stdout (SessionStart context). Returns stdout text.
  */
@@ -99,20 +128,28 @@ export function handleHook(
   env: NodeJS.ProcessEnv,
   now: Date,
 ): string {
-  const cwd = typeof input.cwd === "string" ? input.cwd : process.cwd();
+  // A Cursor chat reaching us through Claude's hooks: Cursor's own hooks carry this event.
+  if (agent !== "cursor" && isCursorPayload(input)) return "";
+  const cwd = hookCwd(input, env);
   // Frequent hooks run on every tool call or turn: no git process on that path.
   const root = trustedRoot(cwd, !HOT.has(name));
   if (!root) return "";
   const sid = hookSid(input, env, loadSession(root)?.sid);
+  const account = accountFromEnv(agent, env);
   const rel = (p: string) => (isAbsolute(p) ? relative(root, realish(p)) : p);
-  const status = (patch: Parameters<typeof updateStatus>[2]) => updateStatus(sid, root, patch, now);
+  const status = (patch: Omit<Parameters<typeof updateStatus>[2], "agent">) =>
+    updateStatus(sid, root, { agent, ...(account !== agent ? { account } : {}), ...patch }, now);
+  // Cursor hooks answer in Cursor's own output shapes; Claude's prompt hook would treat any
+  // stdout as extra context, so it must stay silent.
+  const cursor = agent === "cursor";
 
   switch (name) {
     case "session-start":
       // Synchronous on purpose: the base must predate the agent's first edit, or that work would
       // look like it was already there. Fast thanks to the persistent snapshot index.
       if (!env.NOWALL_SID) ensureExternalSession(root, sid, agent, now);
-      status({ agent, phase: "idle", detail: "Session started" });
+      status({ phase: "idle", detail: "Session started" });
+      if (cursor) return JSON.stringify({ additional_context: JOURNAL_RULE });
       return JSON.stringify({
         hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: JOURNAL_RULE },
       });
@@ -121,14 +158,18 @@ export function handleHook(
       const prompt = typeof input.prompt === "string" ? input.prompt : "";
       if (prompt.trim() && !prompt.trim().startsWith("/")) {
         appendJournal(root, { sid, agent, kind: "goal", text: prompt });
-        status({ agent, phase: "working", detail: prompt });
+        status({ phase: "working", detail: prompt });
       }
-      return "";
+      return cursor ? JSON.stringify({ continue: true }) : "";
     }
 
     case "post-tool": {
-      clearCooldownIfWorking(agent, now);
-      const tool = String(input.tool_name ?? (input.file_path ? "Edit" : ""));
+      clearCooldownIfWorking(account, now);
+      // Cursor's afterShellExecution carries the command at the top level, afterFileEdit the file.
+      const tool = String(
+        input.tool_name ??
+          (input.file_path ? "Edit" : typeof input.command === "string" ? "shell" : ""),
+      );
       const ti = (input.tool_input ?? {}) as Json;
       const file = [ti.file_path, ti.path, ti.notebook_path, input.file_path].find(
         (v): v is string => typeof v === "string",
@@ -136,12 +177,12 @@ export function handleHook(
       if (EDIT_TOOLS.test(tool) || (file && !SHELL_TOOLS.test(tool))) {
         const f = file ? rel(file) : undefined;
         appendJournal(root, { sid, agent, kind: "edit", text: tool, files: f ? [f] : [] });
-        status({ agent, phase: "working", detail: describeTool(tool, f) });
+        status({ phase: "working", detail: describeTool(tool, f) });
       } else if (SHELL_TOOLS.test(tool)) {
-        const cmd = ti.command;
+        const cmd = ti.command ?? input.command;
         const text = Array.isArray(cmd) ? cmd.join(" ") : String(cmd ?? "");
         if (text) appendJournal(root, { sid, agent, kind: "cmd", text: text.slice(0, 120) });
-        status({ agent, phase: "working", detail: describeTool(tool, undefined, text) });
+        status({ phase: "working", detail: describeTool(tool, undefined, text) });
       }
       return "";
     }
@@ -149,16 +190,25 @@ export function handleHook(
     case "notification": {
       // Claude asks for permission or is waiting on the user.
       const message = typeof input.message === "string" ? input.message : "Needs your input";
-      status({ agent, phase: "needs-input", detail: message });
+      status({ phase: "needs-input", detail: message });
       return "";
     }
 
-    case "stop":
-      status({ agent, phase: "your-turn", detail: "Finished its turn" });
+    case "stop": {
+      // Cursor's stop hook says how the turn ended; Claude's just fires.
+      const outcome = typeof input.status === "string" ? input.status : "completed";
+      const detail =
+        outcome === "error"
+          ? "Stopped with an error"
+          : outcome === "aborted"
+            ? "Stopped by you"
+            : "Finished its turn";
+      status({ phase: "your-turn", detail });
       return "";
+    }
 
     case "session-end":
-      status({ agent, phase: "ended", detail: "Session closed" });
+      status({ phase: "ended", detail: "Session closed" });
       return "";
 
     case "stop-failure": {
@@ -168,14 +218,15 @@ export function handleHook(
         window: "unknown",
         message: "usage limit reached",
       };
-      saveState(recordLimit(loadState(), agent, hit, now, loadConfig().defaultCooldownMinutes));
+      saveState(recordLimit(loadState(), account, hit, now, loadConfig().defaultCooldownMinutes));
       appendJournal(root, { sid, agent, kind: "limit", text: hit.message });
-      status({ agent, phase: "handing-off", detail: hit.message });
+      status({ phase: "handing-off", detail: hit.message });
 
       if (env.NOWALL_SID) {
         // Supervised by `nowall run`: tell the wrapper, which stops the agent and hands off.
         const signal: LimitSignal = {
           agent,
+          account,
           sid,
           window: hit.window,
           message: hit.message,
@@ -185,7 +236,7 @@ export function handleHook(
         writeJson(signalPath(root, sid), signal);
       } else if (loadConfig().takeover !== "off" && !isLocked(root)) {
         ensureExternalSession(root, sid, agent, now);
-        launchTakeover(root, sid, agent, env);
+        launchTakeover(root, sid, account, env);
       }
       return "";
     }
@@ -195,19 +246,19 @@ export function handleHook(
 }
 
 /**
- * A tool call only completes after the model answered, so the agent isn't limited right now:
+ * A tool call only completes after the model answered, so the account isn't limited right now:
  * drop any cooldown we recorded (e.g. the user raised their spend limit or bought more usage).
  */
-export function clearCooldownIfWorking(agent: AgentId, now: Date): void {
+export function clearCooldownIfWorking(account: AccountId, now: Date): void {
   const state = loadState();
-  const s = state.agents[agent];
+  const s = state.agents[account];
   if (!s?.cooldownUntil || Date.parse(s.cooldownUntil) <= now.getTime()) return;
-  state.agents[agent] = { ...s, cooldownUntil: now.toISOString() };
+  state.agents[account] = { ...s, cooldownUntil: now.toISOString() };
   saveState(state);
 }
 
-function takeoverArgs(cli: string, sid: string, agent: AgentId): string[] {
-  return [cli, "takeover", "--sid", sid, "--from", agent];
+function takeoverArgs(cli: string, sid: string, from: AccountId): string[] {
+  return [cli, "takeover", "--sid", sid, "--from", from];
 }
 
 /**
@@ -219,7 +270,7 @@ function takeoverArgs(cli: string, sid: string, agent: AgentId): string[] {
 export function launchTakeover(
   root: string,
   sid: string,
-  agent: AgentId,
+  from: AccountId,
   env: NodeJS.ProcessEnv,
   open: (script: string) => void = (script) =>
     spawn("open", ["-a", "Terminal", script], { detached: true, stdio: "ignore" }).unref(),
@@ -234,7 +285,7 @@ export function launchTakeover(
     const log = join(handoffDir(root), "takeover.log");
     const fd = openSync(log, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
     try {
-      spawn(process.execPath, takeoverArgs(cli, sid, agent), {
+      spawn(process.execPath, takeoverArgs(cli, sid, from), {
         cwd: root,
         detached: true,
         stdio: ["ignore", fd, fd],
@@ -251,7 +302,7 @@ export function launchTakeover(
     NOWALL_NODE: process.execPath,
     NOWALL_CLI: cli,
     NOWALL_TAKEOVER_SID: sid,
-    NOWALL_TAKEOVER_FROM: agent,
+    NOWALL_TAKEOVER_FROM: from,
     NOWALL_EXTRA_PATH: path,
   };
   if (env.NOWALL_HOME) vars.NOWALL_HOME = env.NOWALL_HOME;

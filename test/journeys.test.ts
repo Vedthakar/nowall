@@ -35,7 +35,7 @@ function sandbox(opts: { agents?: string[]; repoName?: string; plan?: unknown } 
     const agent = name === "cursor-agent" ? "cursor" : name;
     writeFileSync(
       join(bin, name),
-      `#!/bin/sh\ncase "$1" in --version) echo "fake ${agent}"; exit 0;; status) echo '{"isAuthenticated":true}'; exit 0;; esac\nexec "${process.execPath}" "${FAKE}" ${agent} "$@"\n`,
+      `#!/bin/sh\ncase "$1" in --version) echo "fake ${agent}"; exit 0;; status) echo '{"isAuthenticated":true}'; exit 0;; auth) echo '{"loggedIn":true}'; exit 0;; esac\nexec "${process.execPath}" "${FAKE}" ${agent} "$@"\n`,
     );
     chmodSync(join(bin, name), 0o755);
   }
@@ -291,7 +291,22 @@ describe("journeys: one-command global setup", { timeout: 90_000 }, () => {
     expect(JSON.stringify(settings.hooks.Stop)).toContain("say done");
     expect(settings.hooks.StopFailure).toHaveLength(1);
     expect(settings.statusLine.command).toContain("statusline");
-    expect(existsSync(join(s.home, ".cursor", "hooks.json"))).toBe(true);
+    const cursorHooks = JSON.parse(readFileSync(join(s.home, ".cursor", "hooks.json"), "utf8"));
+    // The whole chat lifecycle, so Cursor chats show in the notch (not just edits).
+    expect(Object.keys(cursorHooks.hooks).sort()).toEqual(
+      [
+        "afterFileEdit",
+        "afterShellExecution",
+        "beforeSubmitPrompt",
+        "sessionEnd",
+        "sessionStart",
+        "stop",
+      ].sort(),
+    );
+    for (const groups of Object.values(cursorHooks.hooks) as { command: string }[][]) {
+      expect(groups).toHaveLength(1); // re-running setup never duplicates
+      expect(groups[0]?.command).toContain("NOWALL_HOOK=1");
+    }
     expect(existsSync(join(s.home, ".codex", "hooks.json"))).toBe(false); // no Codex here: untouched
     expect(JSON.parse(readFileSync(join(s.home, "config.json"), "utf8")).scope).toBe("global");
     expect(existsSync(join(s.home, "agents.json"))).toBe(true);

@@ -24,6 +24,7 @@ import {
   signalPath,
 } from "../src/session.js";
 import { loadState, saveConfig, saveState, trustRepo } from "../src/state.js";
+import { readStatus } from "../src/status.js";
 import { sh, tempRepo } from "./helpers.js";
 
 const NOW = new Date("2026-10-15T18:00:00Z");
@@ -74,6 +75,110 @@ describe("handleHook", () => {
       ["cmd", "npm test", undefined],
       ["edit", "Edit", ["b.ts"]],
     ]);
+  });
+
+  it("Cursor IDE hooks: finds the repo from workspace_roots and tracks the whole chat", () => {
+    const repo = initRepo();
+    const elsewhere = mkdtempSync(join(tmpdir(), "nowall-cursor-cwd-")); // Cursor runs user hooks from ~/.cursor
+    const prevCwd = process.cwd();
+    process.chdir(elsewhere);
+    try {
+      const base = {
+        conversation_id: "abc-123",
+        session_id: "abc-123",
+        workspace_roots: [repo],
+        hook_event_name: "x",
+      };
+      const start = handleHook(
+        "session-start",
+        "cursor",
+        { ...base, composer_mode: "agent" },
+        {},
+        NOW,
+      );
+      expect(JSON.parse(start).additional_context).toContain("nowall note --task");
+      const prompt = handleHook("prompt", "cursor", { ...base, prompt: "fix the bug" }, {}, NOW);
+      expect(JSON.parse(prompt)).toEqual({ continue: true });
+      expect(readStatus("c_abc-123")).toMatchObject({
+        agent: "cursor",
+        phase: "working",
+        repoName: repo.split("/").pop(),
+      });
+      handleHook(
+        "post-tool",
+        "cursor",
+        { ...base, file_path: join(repo, "src/x.ts"), edits: [] },
+        {},
+        NOW,
+      );
+      handleHook(
+        "post-tool",
+        "cursor",
+        { ...base, command: "npm test", output: "", duration: 5 },
+        {},
+        NOW,
+      );
+      expect(readJournal(repo, "c_abc-123").map((l) => [l.kind, l.text])).toEqual([
+        ["goal", "fix the bug"],
+        ["edit", "Edit"],
+        ["cmd", "npm test"],
+      ]);
+      expect(readStatus("c_abc-123")?.detail).toBe("Running npm test");
+      handleHook("stop", "cursor", { ...base, status: "completed", loop_count: 0 }, {}, NOW);
+      expect(readStatus("c_abc-123")?.phase).toBe("your-turn");
+      handleHook("stop", "cursor", { ...base, status: "error", loop_count: 0 }, {}, NOW);
+      expect(readStatus("c_abc-123")?.detail).toBe("Stopped with an error");
+      handleHook("session-end", "cursor", { ...base, reason: "user_close" }, {}, NOW);
+      expect(readStatus("c_abc-123")?.phase).toBe("ended");
+    } finally {
+      process.chdir(prevCwd);
+    }
+  });
+
+  it("falls back to CURSOR_PROJECT_DIR when the payload has no roots", () => {
+    const repo = initRepo();
+    const prevCwd = process.cwd();
+    process.chdir(tmpdir());
+    try {
+      handleHook(
+        "prompt",
+        "cursor",
+        { session_id: "s1", prompt: "go" },
+        { CURSOR_PROJECT_DIR: repo },
+        NOW,
+      );
+      expect(readJournal(repo, "c_s1")).toHaveLength(1);
+    } finally {
+      process.chdir(prevCwd);
+    }
+  });
+
+  it("ignores a Cursor event that arrives through Claude-format hooks (no double counting)", () => {
+    const repo = initRepo();
+    const cursorShaped = {
+      conversation_id: "conv1",
+      session_id: "s1",
+      hook_event_name: "afterShellExecution",
+      workspace_roots: [repo],
+      command: "npm test",
+    };
+    // Cursor runs ~/.claude/settings.json hooks too; that copy must stay silent...
+    expect(handleHook("post-tool", "claude", cursorShaped, {}, NOW)).toBe("");
+    expect(readJournal(repo, "c_s1")).toHaveLength(0);
+    expect(readStatus("c_s1")).toBeNull();
+    // ...while the real Cursor hook records it once, as Cursor.
+    handleHook("post-tool", "cursor", cursorShaped, {}, NOW);
+    expect(readJournal(repo, "c_s1")).toHaveLength(1);
+    expect(readStatus("c_s1")?.agent).toBe("cursor");
+    // A real Claude event (cwd, no Cursor fields) still goes through.
+    handleHook(
+      "post-tool",
+      "claude",
+      { session_id: "s2", cwd: repo, tool_name: "Bash", tool_input: { command: "ls" } },
+      {},
+      NOW,
+    );
+    expect(readStatus("c_s2")?.agent).toBe("claude");
   });
 
   it("session-start injects the journal rule as context", () => {

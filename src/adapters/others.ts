@@ -27,12 +27,12 @@ export const cursor: AgentAdapter = {
   loginHint: "cursor-agent login",
   maturity: "beta",
 
-  async detect(run, bin) {
-    const version = await versionOf(run, bin);
+  async detect(run, bin, env) {
+    const version = await versionOf(run, bin, env);
     if (version === null) return { installed: false, signedIn: false };
     // `status --format json` reports isAuthenticated:true even when the server rejects an expired
     // login (seen on 2026.07.09); the plain output says "unable to fetch user details" then.
-    const plain = await run(bin, ["status"]);
+    const plain = await run(bin, ["status"], undefined, env);
     if (
       /unable to fetch user details|not logged in|authentication required/i.test(
         plain.stdout + plain.stderr,
@@ -40,7 +40,7 @@ export const cursor: AgentAdapter = {
     ) {
       return { installed: true, version, signedIn: false };
     }
-    const r = await run(bin, ["status", "--format", "json"]);
+    const r = await run(bin, ["status", "--format", "json"], undefined, env);
     try {
       const s = JSON.parse(r.stdout) as { isAuthenticated?: boolean };
       return { installed: true, version, signedIn: s.isAuthenticated === true };
@@ -77,12 +77,24 @@ export const cursor: AgentAdapter = {
   },
 };
 
+/** Cursor hook event → nowall hook. The whole chat lifecycle, so chats show in the notch. */
+export const CURSOR_EVENTS: Record<string, string> = {
+  sessionStart: "session-start",
+  beforeSubmitPrompt: "prompt",
+  afterFileEdit: "post-tool",
+  afterShellExecution: "post-tool",
+  stop: "stop",
+  sessionEnd: "session-end",
+};
+
 function cursorHooks(existing: Record<string, unknown>, nowall: string): Record<string, unknown> {
   const hooks = { ...((existing.hooks as Record<string, unknown[]>) ?? {}) };
-  hooks.afterFileEdit = [
-    ...(hooks.afterFileEdit ?? []).filter((h) => !isOurs(h)),
-    { command: `${HOOK_MARK} ${nowall} hook post-tool --agent cursor` },
-  ];
+  for (const [event, ours] of Object.entries(CURSOR_EVENTS)) {
+    hooks[event] = [
+      ...(hooks[event] ?? []).filter((h) => !isOurs(h)),
+      { command: `${HOOK_MARK} ${nowall} hook ${ours} --agent cursor` },
+    ];
+  }
   return { version: 1, ...existing, hooks };
 }
 
