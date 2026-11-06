@@ -11,5 +11,8 @@ export default defineConfig({
     // Each worker spawns many real processes; too many at once starves vitest's own messaging.
     poolOptions: { forks: { maxForks: 4 } },
     env: { NOWALL_NO_LAUNCHD: "1" },
+    // Long synchronous spawns can delay vitest's own progress messages past its 60 s limit. That
+    // says nothing about the code under test; real failures and other errors still fail the run.
+    onUnhandledError: (error) => !error.message?.includes('Timeout calling "onTaskUpdate"'),
   },
 });

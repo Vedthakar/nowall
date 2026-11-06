@@ -161,7 +161,7 @@ async function check(name, budgetMs, fn) {
   ]) {
     writeFileSync(
       join(bin, name),
-      `#!/bin/sh\ncase "$1" in --version) echo x; exit 0;; status) echo '{"isAuthenticated":true}'; exit 0;; esac\nexec "${process.execPath}" "${join(ROOT, "scripts", "fake-agent.mjs")}" ${agent} "$@"\n`,
+      `#!/bin/sh\ncase "$1" in --version) echo x; exit 0;; status) echo '{"isAuthenticated":true}'; exit 0;; auth) echo '{"loggedIn":true}'; exit 0;; esac\nexec "${process.execPath}" "${join(ROOT, "scripts", "fake-agent.mjs")}" ${agent} "$@"\n`,
       { mode: 0o755 },
     );
   }
