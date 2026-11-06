@@ -10,7 +10,7 @@ import {
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
@@ -173,9 +173,13 @@ export function logSince(root: string, base: string): string[] {
   return out ? out.split("\n").filter(Boolean).slice(0, 30) : [];
 }
 
-/** Hides a path from git status without touching the user's .gitignore. */
+/**
+ * Hides a path from git status without touching the user's .gitignore. `info/exclude` lives in
+ * the *common* git dir: in a linked worktree `--absolute-git-dir` is `.git/worktrees/<name>`,
+ * whose `info/exclude` git never reads.
+ */
 export function excludeLocally(root: string, pattern: string): void {
-  const infoDir = join(git(root, ["rev-parse", "--absolute-git-dir"]), "info");
+  const infoDir = join(resolve(root, git(root, ["rev-parse", "--git-common-dir"])), "info");
   const file = join(infoDir, "exclude");
   const current = existsSync(file) ? readFileSync(file, "utf8") : "";
   if (current.split("\n").includes(pattern)) return;

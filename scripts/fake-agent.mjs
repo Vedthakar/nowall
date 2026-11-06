@@ -3,7 +3,11 @@
 // Usage: fake-agent.mjs <agent-name> [agent args...]
 // A turn may also set `auth: "<message>"` to simulate an expired or missing login.
 // Behaviour comes from the JSON plan at $FAKE_PLAN: { "<agent>": [turn, turn, ...] }, where a turn is
-//   { prompt?, files?: {path: content}, notes?: [["--task","x"],...], tasks?: {...}, text?, limit?: "message", sleepMs? }
+//   { prompt?, files?: {path: content}, notes?: [["--task","x"],...], tasks?: {...}, text?, limit?: "message", sleepMs?,
+//     subagents?: [{ type?, ms? }] }
+// `subagents` (interactive Claude only) fires SubagentStart for each, a tool event from inside each,
+// the parent's Stop, and then SubagentStop per child after `ms` — the real order, which is what makes
+// a chat look finished while its subagents still run.
 // Every invocation is logged to $FAKE_PLAN.calls.jsonl so tests can assert on prompts and flags.
 import { execSync, spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -72,7 +76,38 @@ if (!headless) {
   // Interactive Claude Code.
   fireClaudeHook("SessionStart", { source: "startup" });
   if (turn.prompt) fireClaudeHook("UserPromptSubmit", { prompt: turn.prompt });
+  const subagents = (turn.subagents ?? []).map((s, i) => ({
+    agent_id: `agent-${n}-${i}`,
+    agent_type: s.type ?? "general-purpose",
+    ms: s.ms ?? s.sleepMs ?? 0,
+  }));
+  for (const s of subagents)
+    fireClaudeHook("SubagentStart", { agent_id: s.agent_id, agent_type: s.agent_type });
   doWork();
+  if (subagents.length) {
+    // Hooks inside a subagent carry the parent's session_id plus agent_id.
+    for (const s of subagents)
+      fireClaudeHook("PostToolUse", {
+        agent_id: s.agent_id,
+        agent_type: s.agent_type,
+        tool_name: "Bash",
+        tool_input: { command: `echo ${s.agent_type}` },
+      });
+    // The parent's turn ends while its (background) subagents are still running.
+    fireClaudeHook("Stop", { stop_hook_active: false });
+    // Claude's internal helper agents fire SubagentStop too, with an empty agent_type.
+    fireClaudeHook("SubagentStop", { agent_id: `helper-${n}`, agent_type: "" });
+    let elapsed = 0;
+    for (const s of [...subagents].sort((a, b) => a.ms - b.ms)) {
+      if (s.ms > elapsed) await new Promise((r) => setTimeout(r, s.ms - elapsed));
+      elapsed = Math.max(elapsed, s.ms);
+      fireClaudeHook("SubagentStop", {
+        agent_id: s.agent_id,
+        agent_type: s.agent_type,
+        agent_transcript_path: join(cwd, ".handoff", `subagents/${s.agent_id}.jsonl`),
+      });
+    }
+  }
   if (!turn.limit) process.exit(0);
   const transcript = join(cwd, ".handoff", `fake-transcript-${n}.jsonl`);
   writeFileSync(

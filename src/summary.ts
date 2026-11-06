@@ -40,7 +40,9 @@ export function renderSummary(root: string, session: Session): string {
   const worked = segs.filter((s) => s.endReason !== "auth");
   const last = worked.at(-1);
   const prev = worked.at(-2);
-  if (last && prev?.endReason === "limit" && prev.limit) {
+  if (last && prev?.endReason === "manual") {
+    lines[0] += ` The last part was built by ${who(last)} because you switched from ${who(prev)}.`;
+  } else if (last && prev?.endReason === "limit" && prev.limit) {
     const reset = prev.limit.resetsAt ? ` (resets ${fmtTime(prev.limit.resetsAt)})` : "";
     lines[0] += ` The last part was built by ${who(last)} because ${who(prev)} hit its ${WINDOW[prev.limit.window] ?? "usage limit"}${reset}.`;
   }
@@ -54,9 +56,11 @@ export function renderSummary(root: string, session: Session): string {
       const why =
         s.endReason === "limit"
           ? `hit ${WINDOW[s.limit?.window ?? "unknown"]}`
-          : s.endReason === "auth"
-            ? "not signed in, skipped"
-            : "finished";
+          : s.endReason === "manual"
+            ? "switched by you"
+            : s.endReason === "auth"
+              ? "not signed in, skipped"
+              : "finished";
       lines.push(`  ${i + 1}. ${who(s)}: ${stat || "no file changes"} (${why})`);
     });
     lines.push("");

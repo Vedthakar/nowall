@@ -34,7 +34,11 @@ Keep each under 120 characters. Do not record anything else; edits and commands 
 /** First prompt for the destination agent: reconcile, then continue. */
 export function masterPrompt(p: HandoffPacket): string {
   const reset = p.from.resetsAt ? ` (resets ${p.from.resetsAt})` : "";
-  return `You are taking over an in-progress coding task in this repository. ${agentName(p.from.agent)} was working on it and hit its usage limit${reset}. The user is not watching; continue the work autonomously.
+  const why =
+    p.from.reason === "manual"
+      ? "the user chose to hand the work to you"
+      : `hit its usage limit${reset}`;
+  return `You are taking over an in-progress coding task in this repository. ${agentName(p.from.agent)} was working on it and ${why}. The user is not watching; continue the work autonomously.
 
 <handoff version="${MASTER_PROMPT_VERSION}" session="${p.sessionId}">
 ## Goal (the user's own requests, oldest first)

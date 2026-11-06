@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { readJsonSafe, writeAtomic } from "../fsafe.js";
+import { readJsonSafe, shq, writeAtomic } from "../fsafe.js";
 import type { AgentEvent } from "./types.js";
 
 type Json = Record<string, unknown>;
@@ -124,6 +124,26 @@ export const HOOK_MARK = "NOWALL_HOOK=1";
 export function isOurs(entry: unknown): boolean {
   const text = JSON.stringify(entry);
   return text.includes(HOOK_MARK) || text.includes("nowall hook");
+}
+
+/**
+ * Claude's status-line tap. When the user already has a status line, ours runs first and then
+ * hands the same JSON to theirs (`--then`), so they keep their display and get usage rings.
+ */
+export function statusLineCommand(nowall: string, inner?: string): string {
+  const base = `${HOOK_MARK} ${nowall} statusline`;
+  return inner ? `${base} --then ${shq(inner)}` : base;
+}
+
+/** The user's own command wrapped by `statusLineCommand`, or undefined for a plain nowall tap. */
+export function unwrapStatusLine(command: string): string | undefined {
+  const at = command.indexOf(" --then ");
+  if (at < 0) return undefined;
+  const quoted = command.slice(at + " --then ".length).trim();
+  if (quoted.length >= 2 && quoted.startsWith("'") && quoted.endsWith("'")) {
+    return quoted.slice(1, -1).replace(/'\\''/g, "'");
+  }
+  return quoted || undefined;
 }
 
 /** Claude/Codex-style `hooks` object: drop prior nowall groups, add ours. */

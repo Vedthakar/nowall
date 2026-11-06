@@ -12,8 +12,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ADAPTERS, resolveBinary } from "../src/adapters/index.js";
+import { CURSOR_EVENTS } from "../src/adapters/others.js";
 import { sanitizeTerminal } from "../src/fsafe.js";
-import { handleHook, hookSid, launchTakeover, trustedRoot } from "../src/hooks.js";
+import {
+  ALLOW_SUBAGENT,
+  handleHook,
+  hookSid,
+  isCursorPayload,
+  launchTakeover,
+  trustedRoot,
+} from "../src/hooks.js";
 import { installAlias, stripBlock } from "../src/init.js";
 import { DEFAULT_CONFIG } from "../src/schemas.js";
 import {
@@ -24,7 +32,13 @@ import {
   signalPath,
 } from "../src/session.js";
 import { loadState, saveConfig, saveState, trustRepo } from "../src/state.js";
-import { readStatus } from "../src/status.js";
+import {
+  pruneStatus,
+  readChildrenMap,
+  readStatus,
+  statusDir,
+  updateStatus,
+} from "../src/status.js";
 import { sh, tempRepo } from "./helpers.js";
 
 const NOW = new Date("2026-10-15T18:00:00Z");

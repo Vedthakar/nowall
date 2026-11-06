@@ -12,7 +12,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { appendSafe, readSmall, readTail } from "./fsafe.js";
-import { redact } from "./redact.js";
+import { loadEnvValues, redact, redactDeep } from "./redact.js";
 import type { AccountId, AgentId, JournalLine, LimitWindow, TaskList } from "./schemas.js";
 import { isTaskList } from "./schemas.js";
 import { readJson, writeJson } from "./state.js";
@@ -63,7 +63,8 @@ export interface Segment {
   mode: "interactive" | "headless";
   startedAt: string;
   endedAt?: string;
-  endReason?: "limit" | "exit" | "auth" | StopReason;
+  /** "manual": the user asked nowall to switch (`nowall switch`), no limit was hit. */
+  endReason?: "limit" | "exit" | "auth" | "manual" | StopReason;
   limit?: { window: LimitWindow; message: string; resetsAt?: string };
   /** Checkpoint commit taken when the segment ended. */
   checkpoint?: string;
@@ -90,6 +91,17 @@ export interface Session {
   /** Things the user must do, shown in the summary (e.g. "run cursor-agent login"). */
   notices?: string[];
   finished?: { at: string; reason: StopReason };
+  /**
+   * Set by `nowall switch`: the next handoff is on request, not a limit, so no cooldown is
+   * recorded and `to` (if given) goes first. `failover` consumes and clears it.
+   */
+  switch?: ManualSwitch;
+}
+
+export interface ManualSwitch {
+  from: AccountId;
+  to?: AccountId;
+  at: string;
 }
 
 export function newSessionId(): string {
@@ -111,28 +123,34 @@ export function loadSession(root: string): Session | null {
     : null;
 }
 
+/** Limit messages and notices come from agent error text: redacted like everything else we keep. */
 export function saveSession(root: string, session: Session): void {
-  writeJson(sessionPath(root), session);
+  writeJson(sessionPath(root), redactDeep(session));
 }
 
 export function journalPath(root: string): string {
   return join(handoffDir(root), "journal.jsonl");
 }
 
-/** Appends one redacted journal line. Text is capped so the journal stays tiny. */
+/**
+ * Appends one redacted journal line. Text is capped so the journal stays tiny. The exact values
+ * from the repo's `.env*` files are stripped too (a prompt or command that pastes one in).
+ */
 export function appendJournal(
   root: string,
   line: Omit<JournalLine, "v" | "ts"> & { ts?: string },
 ): void {
+  const opts = { knownValues: loadEnvValues(root) };
   const entry: JournalLine = {
     v: 1,
     ts: line.ts ?? new Date().toISOString(),
     sid: line.sid,
     agent: line.agent,
     kind: line.kind,
-    text: redact(line.text).replace(/\s+/g, " ").trim().slice(0, 200),
+    text: redact(line.text, opts).replace(/\s+/g, " ").trim().slice(0, 200),
   };
-  if (line.files?.length) entry.files = [...new Set(line.files.map((f) => redact(f)))].slice(0, 20);
+  if (line.files?.length)
+    entry.files = [...new Set(line.files.map((f) => redact(f, opts)))].slice(0, 20);
   if (line.status) entry.status = line.status;
   appendSafe(journalPath(root), `${JSON.stringify(entry)}\n`);
 }
@@ -191,23 +209,47 @@ export function isLocked(root: string): boolean {
   return pid !== process.pid && pidAlive(pid);
 }
 
-/** One supervisor per repo. Returns false if another live process holds the lock. */
+/**
+ * One supervisor per repo. Returns false if another live process holds the lock. A lock left by
+ * a dead process is moved aside before it is removed, so two processes starting at the same
+ * moment can never both delete a lock the other just created; the winner is whoever creates the
+ * file exclusively, and it confirms by reading its own pid back.
+ */
 export function acquireLock(root: string): boolean {
-  if (isLocked(root)) return false;
-  rmSync(lockPath(root), { force: true }); // stale lock from a dead process
-  try {
-    const fd = openSync(
-      lockPath(root),
-      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
-      0o600,
-    );
-    writeSync(fd, String(process.pid));
-    closeSync(fd);
-  } catch {
-    return false; // lost a race with another process
+  const path = lockPath(root);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+    } catch {
+      const pid = Number(readSmall(path, 64)?.trim());
+      if (pid === process.pid) return true; // we already hold it
+      if (pidAlive(pid)) return false;
+      // Stale: claim it by renaming (atomic), then make sure we didn't grab a live one.
+      const aside = `${path}.stale.${process.pid}`;
+      try {
+        renameSync(path, aside);
+      } catch {
+        continue; // someone else moved it first; try again
+      }
+      const owner = Number(readSmall(aside, 64)?.trim());
+      if (pidAlive(owner) && owner !== process.pid) {
+        try {
+          renameSync(aside, path); // give it back
+        } catch {
+          rmSync(aside, { force: true });
+        }
+        return false;
+      }
+      rmSync(aside, { force: true });
+      continue;
+    }
+    if (Number(readSmall(path, 64)?.trim()) !== process.pid) return false; // moved from under us
+    process.once("exit", () => releaseLock(root));
+    return true;
   }
-  process.once("exit", () => releaseLock(root));
-  return true;
+  return false;
 }
 
 export function releaseLock(root: string): void {
@@ -227,4 +269,8 @@ export interface LimitSignal {
   message: string;
   resetsAt?: string;
   observedAt: string;
+  /** "manual": written by `nowall switch`; absent or "quota": the agent hit a limit. */
+  kind?: "quota" | "manual";
+  /** Account the user asked for (`nowall switch --to`). */
+  to?: AccountId;
 }

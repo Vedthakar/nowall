@@ -77,12 +77,18 @@ export const cursor: AgentAdapter = {
   },
 };
 
-/** Cursor hook event → nowall hook. The whole chat lifecycle, so chats show in the notch. */
+/**
+ * Cursor hook event → nowall hook. The whole chat lifecycle, so chats show in the notch, plus
+ * subagents: a Cursor subagent is its own conversation, so the parent needs to know when one
+ * starts and stops to keep showing "working" until all of them are done.
+ */
 export const CURSOR_EVENTS: Record<string, string> = {
   sessionStart: "session-start",
   beforeSubmitPrompt: "prompt",
   afterFileEdit: "post-tool",
   afterShellExecution: "post-tool",
+  subagentStart: "subagent-start",
+  subagentStop: "subagent-stop",
   stop: "stop",
   sessionEnd: "session-end",
 };

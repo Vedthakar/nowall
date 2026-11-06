@@ -17,7 +17,13 @@ import {
 } from "./accounts.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
-import { type AgentsSnapshot, agentsPath, refreshAgents } from "./agents.js";
+import {
+  type AgentsSnapshot,
+  agentsPath,
+  refreshAgents,
+  runAccountLogin,
+  runAccountVerify,
+} from "./agents.js";
 import { runDemo } from "./demo.js";
 import { readJsonSafe } from "./fsafe.js";
 import { checkpoint, listCheckpoints, repoRoot, restore } from "./git.js";
@@ -33,25 +39,22 @@ import {
   loadSession,
   saveSession,
 } from "./session.js";
-import {
-  notchStatus,
-  runLogs,
-  runSetup,
-  runStatusline,
-  runTeardown,
-  startNotch,
-  stopNotch,
-} from "./setup.js";
+import { notchStatus, runLogs, runSetup, runStatusline, startNotch, stopNotch } from "./setup.js";
 import { isTrustedRepo, loadConfig, loadState, saveConfig } from "./state.js";
 import { writeSummary } from "./summary.js";
 import { type Deps, failover, fmtTime, runInteractive, startSession } from "./supervisor.js";
+import { runTour } from "./tour.js";
+import { runUninstallGlobal } from "./uninstall.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 const HELP = `nowall ${VERSION}: when your coding agent hits its usage limit, the work keeps going.
 
 Usage:
-  nowall setup                turn nowall on for every project, find your agents, start the notch
+  nowall setup [--yes] [--no-accounts] [--no-notch]
+                              turn nowall on for every project, find your agents, add extra
+                              accounts, start the notch (about 30 seconds)
+  nowall tour                 what nowall does, how to read the notch, the commands
   nowall init                 set up just this repo instead (hooks, consent, optional shell alias)
   nowall run <agent> [args]   run an agent under nowall (the shell alias does this for you)
   nowall status               agents, sign-in, cooldowns, last session
@@ -60,11 +63,16 @@ Usage:
   nowall logs [-f]            what a background takeover did (or is doing) in this repo
   nowall agents               which agents nowall found, sign-in, cooldowns, usage
   nowall account add <agent> <label>   add a second login (claude, codex: own profile; cursor: API key)
-  nowall account list|remove <id>      list accounts, or forget one
+  nowall account list|remove <id> [--purge]  list accounts, or forget one (--purge also deletes its login folder)
+  nowall account login <id> | verify [id]    sign in again inside a profile; check every login (never prints keys)
   nowall order [id ...]       show or set the takeover priority (e.g. claude claude:work cursor)
   nowall notch [on|off|status] show or hide the macOS notch (off is remembered)
   nowall note --task "..." [--status done|todo] | --decision "..."
   nowall uninstall [--global]  remove this repo's hooks (or, with --global, everything setup added)
+    --global [--yes] [--purge|--keep-data] [--repos] [--npm] [--dry-run]   purge: config, profiles, Keychain items
+  nowall statusline [--then <cmd>]  Claude's status-line tap (installed by setup; chains your own)
+
+Run \`nowall tour\` for the legend.
 `;
 
 /** Agent invocations that are not interactive work sessions: pass straight through. */
@@ -375,16 +383,26 @@ async function cmdAccount(argv: string[]): Promise<number> {
     printAccounts();
     return 0;
   }
+  if (sub === "login") return runAccountLogin(argv.slice(1));
+  if (sub === "verify") return runAccountVerify(argv.slice(1));
   if (sub === "remove" || sub === "rm") {
-    const removed = agentArg ? removeAccount(agentArg) : null;
+    const purge = argv.includes("--purge");
+    const removed = agentArg ? removeAccount(agentArg, { purge }) : null;
     if (!removed) {
       process.stderr.write(`nowall account remove: no extra account "${agentArg ?? ""}".\n`);
       return 1;
     }
     const dir = profilePath(removed);
     process.stdout.write(
-      `Removed ${accountName(removed.id)} from nowall.${dir ? ` Its login stays in ${dir}; delete that folder to log it out.` : ""}\n`,
+      `Removed ${accountName(removed.id)} from nowall.${
+        dir
+          ? purge
+            ? ` Its login folder ${dir} was deleted.`
+            : ` Its login stays in ${dir}; delete that folder to log it out (or re-run with --purge).`
+          : ""
+      }\n`,
     );
+    await refreshAgents();
     return 0;
   }
   if (sub !== "add" || !isAgentId(agentArg) || !label) {
@@ -515,7 +533,7 @@ async function main(argv: string[]): Promise<number> {
     case "demo":
       return runDemo();
     case "uninstall":
-      return rest.includes("--global") ? runTeardown() : runUninstall();
+      return rest.includes("--global") ? runUninstallGlobal(rest) : runUninstall();
     case "setup":
       return runSetup(rest);
     case "account":
@@ -536,8 +554,10 @@ async function main(argv: string[]): Promise<number> {
       } catch {
         // no input
       }
-      return runStatusline(raw);
+      return runStatusline(raw, process.env, rest);
     }
+    case "tour":
+      return runTour(rest);
     case "logs": {
       const root = repoRoot(process.cwd());
       if (!root) {

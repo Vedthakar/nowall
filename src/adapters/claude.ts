@@ -2,7 +2,16 @@ import { join } from "node:path";
 import { readTail } from "../fsafe.js";
 import { classifyLimit } from "../limits.js";
 import type { LimitHit } from "../schemas.js";
-import { HOOK_MARK, cmdHook, mergeHooksFile, parseStreamJson, withHooks } from "./common.js";
+import {
+  HOOK_MARK,
+  cmdHook,
+  isOurs,
+  mergeHooksFile,
+  parseStreamJson,
+  statusLineCommand,
+  unwrapStatusLine,
+  withHooks,
+} from "./common.js";
 import { type AgentAdapter, versionOf } from "./types.js";
 
 export const claude: AgentAdapter = {
@@ -61,10 +70,15 @@ export const claude: AgentAdapter = {
         join(home, ".claude", "settings.json"),
         (e) => {
           const next = claudeHooks(e, nowall);
-          // Claude's 5h/weekly usage is only exposed to the status line; add a silent tap if none exists.
-          if (!next.statusLine) {
-            next.statusLine = { type: "command", command: `${HOOK_MARK} ${nowall} statusline` };
-          }
+          // Claude's 5h/weekly usage is only exposed to the status line. Tap it silently; if the
+          // user has their own status line, run ours first and pass the same JSON on to theirs.
+          const prev =
+            typeof next.statusLine === "object" && next.statusLine !== null
+              ? (next.statusLine as Record<string, unknown>)
+              : {};
+          const prevCmd = typeof prev.command === "string" ? prev.command : undefined;
+          const inner = prevCmd ? (isOurs(prev) ? unwrapStatusLine(prevCmd) : prevCmd) : undefined;
+          next.statusLine = { ...prev, type: "command", command: statusLineCommand(nowall, inner) };
           return next;
         },
         { followSymlink: true },
@@ -82,6 +96,9 @@ function claudeHooks(existing: Record<string, unknown>, nowall: string): Record<
     StopFailure: [cmdHook(hook("stop-failure"), "rate_limit", 30)],
     Notification: [cmdHook(hook("notification"), undefined, 10)],
     Stop: [cmdHook(hook("stop"), undefined, 10)],
+    // Subagents (Task tool) run inside the same session: keep the chat "working" until they finish.
+    SubagentStart: [cmdHook(hook("subagent-start"), undefined, 10)],
+    SubagentStop: [cmdHook(hook("subagent-stop"), undefined, 10)],
     SessionEnd: [cmdHook(hook("session-end"), undefined, 10)],
   });
 }

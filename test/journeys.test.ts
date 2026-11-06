@@ -13,17 +13,13 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { sh } from "./helpers.js";
 
 // Every command and misuse a user can hit, run against the built CLI as a real process.
 const ROOT = resolve(__dirname, "..");
 const CLI = join(ROOT, "dist", "cli.js");
 const FAKE = join(ROOT, "scripts", "fake-agent.mjs");
-
-beforeAll(() => {
-  execFileSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: ROOT });
-}, 60_000);
 
 function sandbox(opts: { agents?: string[]; repoName?: string; plan?: unknown } = {}) {
   const scratch = mkdtempSync(join(tmpdir(), "nowall-j-"));
@@ -301,6 +297,8 @@ describe("journeys: one-command global setup", { timeout: 90_000 }, () => {
         "sessionEnd",
         "sessionStart",
         "stop",
+        "subagentStart",
+        "subagentStop",
       ].sort(),
     );
     for (const groups of Object.values(cursorHooks.hooks) as { command: string }[][]) {

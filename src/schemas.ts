@@ -8,6 +8,22 @@ export function isAgentId(value: unknown): value is AgentId {
 
 export const ACCOUNT_LABEL_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,23}$/;
 
+/** Labels that would read like an agent or a keyword ("claude:claude", "codex:default"). */
+export const RESERVED_LABELS: ReadonlySet<string> = new Set([...AGENT_IDS, "default"]);
+
+/**
+ * Why a label can't be used, in the user's words, or null when it is fine. Labels are
+ * case-sensitive ("Work" and "work" are two accounts); only ASCII letters, digits, - and _.
+ */
+export function labelProblem(label: string): string | null {
+  if (!label) return "label is empty";
+  if (label.length > 24) return "label is longer than 24 characters";
+  if (!ACCOUNT_LABEL_RE.test(label))
+    return "label may only use letters, digits, - and _ (no spaces or accents) and must start with a letter or digit";
+  if (RESERVED_LABELS.has(label.toLowerCase())) return `"${label}" is reserved; pick another label`;
+  return null;
+}
+
 /** The agent behind an account id ("claude:work" → "claude"), or null if it isn't one. */
 export function accountAgent(id: unknown): AgentId | null {
   if (typeof id !== "string") return null;
@@ -15,7 +31,7 @@ export function accountAgent(id: unknown): AgentId | null {
   const agent = i < 0 ? id : id.slice(0, i);
   const label = i < 0 ? "" : id.slice(i + 1);
   if (!isAgentId(agent)) return null;
-  if (i >= 0 && !ACCOUNT_LABEL_RE.test(label)) return null;
+  if (i >= 0 && labelProblem(label) !== null) return null;
   return agent;
 }
 
@@ -74,7 +90,7 @@ export interface HandoffPacket {
   v: 1;
   sessionId: string;
   createdAt: string;
-  from: { agent: AgentId; reason: "limit"; resetsAt?: string; message?: string };
+  from: { agent: AgentId; reason: "limit" | "manual"; resetsAt?: string; message?: string };
   to: AgentId;
   goal: string[];
   decisions: string[];
@@ -141,6 +157,8 @@ export interface Config {
   path?: string;
   /** false after `nowall notch off`: setup won't start it again until `nowall notch on`. */
   notch?: boolean;
+  /** ISO time until which `nowall pause` stops every takeover (the notch shows "paused"). */
+  pausedUntil?: string;
   fallback: {
     enabled: boolean;
     chinaConsent: boolean;

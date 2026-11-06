@@ -1,11 +1,11 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, rmdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { isOurs, mergeHooksFile, withHooks } from "./adapters/common.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
-import { shq, writeAtomic } from "./fsafe.js";
+import { readJsonSafe, shq, writeAtomic } from "./fsafe.js";
 import { excludeLocally, repoRoot, snapshotTree } from "./git.js";
 import { AGENT_IDS, type Config } from "./schemas.js";
 import { handoffDir, handoffProblem } from "./session.js";
@@ -32,12 +32,19 @@ export const CHINA_CONSENT = `The provider you chose (DeepSeek, Kimi or GLM) is 
 If nowall hands work to it, your code and prompts will be sent to servers in China, under that
 provider's terms. This stays off unless you type "yes".`;
 
-const MARK_START = "# >>> nowall >>>";
-const MARK_END = "# <<< nowall <<<";
+export const MARK_START = "# >>> nowall >>>";
+export const MARK_END = "# <<< nowall <<<";
 
 function rcFile(): string {
   return join(homedir(), (process.env.SHELL ?? "").includes("zsh") ? ".zshrc" : ".bashrc");
 }
+
+/** Per-repo files `nowall init` writes hooks into (relative to the repo root). */
+export const REPO_HOOK_FILES = [
+  ".claude/settings.local.json",
+  ".codex/hooks.json",
+  ".cursor/hooks.json",
+] as const;
 
 async function ask(question: string): Promise<string> {
   if (!process.stdin.isTTY) return "";
@@ -203,27 +210,67 @@ export function stripBlock(text: string): string {
   return text.replace(re, "");
 }
 
-export async function runUninstall(): Promise<number> {
-  for (const file of [join(homedir(), ".zshrc"), join(homedir(), ".bashrc")].map(rcTarget)) {
+/** The shell rc files nowall may have added its alias block to (real paths behind symlinks). */
+export function rcFiles(home = homedir()): string[] {
+  return [join(home, ".zshrc"), join(home, ".bashrc")].map(rcTarget);
+}
+
+/**
+ * Drops every hook nowall wrote into this repo's own hook files (any event, including the Cursor
+ * subagent ones), keeping the user's entries. Returns the files it changed.
+ */
+export function removeRepoHooks(root: string): string[] {
+  const changed: string[] = [];
+  for (const f of REPO_HOOK_FILES) {
+    const p = join(root, f);
+    if (!existsSync(p)) continue;
+    const raw = readFileSync(p, "utf8");
+    if (!isOurs(raw)) continue; // nothing of ours in it: leave the file byte for byte
+    if (f === ".cursor/hooks.json") {
+      mergeHooksFile(p, (existing) => {
+        const hooks: Record<string, unknown[]> = {};
+        for (const [event, list] of Object.entries(existing.hooks ?? {})) {
+          if (!Array.isArray(list)) continue;
+          const kept = list.filter((h) => !isOurs(h));
+          if (kept.length) hooks[event] = kept;
+        }
+        return { ...existing, hooks };
+      });
+    } else {
+      mergeHooksFile(p, (existing) => withHooks(existing, {}));
+    }
+    changed.push(p);
+    removeIfEmptied(p);
+  }
+  return changed;
+}
+
+/** A hook file that held only our hooks goes away, so uninstalling leaves no new file in the repo. */
+function removeIfEmptied(path: string): void {
+  const doc = readJsonSafe<Record<string, unknown>>(path);
+  if (!doc) return;
+  const { hooks, version, ...rest } = doc;
+  const noHooks = !hooks || Object.keys(hooks).length === 0;
+  if (!noHooks || Object.keys(rest).length) return;
+  rmSync(path, { force: true });
+  try {
+    rmdirSync(dirname(path)); // only succeeds when empty
+  } catch {
+    // the folder holds other files: keep it
+  }
+}
+
+export async function runUninstall(cwd = process.cwd()): Promise<number> {
+  for (const file of rcFiles()) {
     if (!existsSync(file)) continue;
     const text = readFileSync(file, "utf8");
     if (text.includes(MARK_START)) writeAtomic(file, stripBlock(text), 0o644);
   }
-  const root = repoRoot(process.cwd());
+  const root = repoRoot(cwd);
   if (root) {
     untrustRepo(root);
-    for (const f of [".claude/settings.local.json", ".codex/hooks.json"]) {
-      const p = join(root, f);
-      if (existsSync(p)) mergeHooksFile(p, (existing) => withHooks(existing, {}));
-    }
-    const cursor = join(root, ".cursor/hooks.json");
-    if (existsSync(cursor)) {
-      mergeHooksFile(cursor, (existing) => {
-        const hooks = { ...((existing.hooks as Record<string, unknown[]>) ?? {}) };
-        hooks.afterFileEdit = (hooks.afterFileEdit ?? []).filter((h) => !isOurs(h));
-        return { ...existing, hooks };
-      });
-    }
+    removeRepoHooks(root);
+    rmSync(join(handoffDir(root), "off"), { force: true }); // per-repo opt-out marker
   }
   process.stdout.write(
     "Removed nowall hooks and shell alias. .handoff/ and checkpoints are kept; delete them if you like.\n",

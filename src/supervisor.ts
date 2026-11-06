@@ -116,6 +116,12 @@ export async function runInteractive(
     const sig = readJsonSafe<LimitSignal>(sigFile, 64 * 1024);
     if (!sig || sig.sid !== session.sid) return; // unreadable or not ours: ignore
     limit = sig;
+    if (sig.kind === "manual") {
+      // `nowall switch`: hand off once without a cooldown (failover reads and clears this).
+      session.switch = { from: sig.account ?? agent, at: sig.observedAt };
+      if (sig.to) session.switch.to = sig.to;
+      saveSession(deps.root, session);
+    }
     child.kill("SIGTERM");
     setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 3000).unref();
   };
@@ -249,6 +255,13 @@ export async function runHeadlessTurn(
   return result;
 }
 
+/** Stands in for the limit when the user switched on purpose; never recorded as a cooldown. */
+export const MANUAL_HIT: LimitHit = {
+  kind: "quota",
+  window: "unknown",
+  message: "switched by you",
+};
+
 /** Accounts that can take over right now: configured, agent binary present, login not ruled out. */
 function available(deps: Deps): Set<AccountId> {
   const out = new Set<AccountId>();
@@ -278,11 +291,18 @@ export async function failover(
   let skippedForAuth = false;
   let cp = { ref: "", commit: session.baseCommit };
   const dropped = new Set<AccountId>();
+  // `nowall switch`: the first hop is on request (no cooldown, preferred account); later hops are normal.
+  let manual = session.switch ?? null;
+  session.switch = undefined;
 
   for (;;) {
     const currentAgent = accountAgent(current) ?? "claude";
     // 1. Record the limit and close the segment that hit it (not again after an auth skip).
-    if (!skippedForAuth) {
+    if (manual) {
+      currentLimit = MANUAL_HIT;
+      cp = takeCheckpoint(deps.root, session, `switch from ${current}`);
+      closeSegment(session, "manual", cp.commit, null, deps.now());
+    } else if (!skippedForAuth) {
       saveState(
         recordLimit(
           loadState(),
@@ -307,7 +327,12 @@ export async function failover(
     const state = loadState();
     const candidates = available(deps);
     for (const id of dropped) candidates.delete(id);
-    const next = pickNext(deps.config, state, candidates, [current], deps.now());
+    // `switch --to`: the user's pick goes first (even while cooling down: it was their call).
+    const wanted = manual?.to;
+    const next =
+      wanted && wanted !== current && candidates.has(wanted)
+        ? wanted
+        : pickNext(deps.config, state, candidates, [current], deps.now());
     if (!next) {
       const er = earliestReset(state, deps.now());
       deps.out(
@@ -329,11 +354,12 @@ export async function failover(
       now: deps.now(),
       envValues,
     });
+    if (manual) packet.from.reason = "manual";
     appendJournal(deps.root, {
       sid: session.sid,
       agent: nextAgent,
       kind: "handoff",
-      text: `${current} -> ${next}`,
+      text: `${manual ? "manual: " : ""}${current} -> ${next}`,
     });
     const segment: Segment = {
       agent: nextAgent,
@@ -347,10 +373,13 @@ export async function failover(
       agent: nextAgent,
       ...(next !== nextAgent ? { account: next } : {}),
       phase: "working",
-      detail: `Taking over from ${accountName(current)}`,
+      detail: manual
+        ? `Switched from ${accountName(current)} on request`
+        : `Taking over from ${accountName(current)}`,
       shares: agentShares(deps.root, session),
     });
     deps.out(dim(`\n── continuing in ${accountName(next)} ──\n`));
+    manual = null;
 
     const adapter = deps.adapters[nextAgent];
     const bin = deps.binaries[nextAgent] as string;

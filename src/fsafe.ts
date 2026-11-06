@@ -23,6 +23,13 @@ import { basename, dirname, join } from "node:path";
  */
 
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+// Opening a FIFO (or a device) read-only blocks until a writer shows up; non-blocking opens
+// return at once and fstat then tells us it isn't a regular file. Harmless for regular files.
+const NONBLOCK = constants.O_NONBLOCK ?? 0;
+const READ_FLAGS = constants.O_RDONLY | NOFOLLOW | NONBLOCK;
+
+/** Directory mode for a file we create: private (0700) when the file itself is private (0600). */
+const dirMode = (fileMode: number) => ((fileMode & 0o077) === 0 ? 0o700 : 0o755);
 
 export function isSymlink(path: string): boolean {
   try {
@@ -36,7 +43,7 @@ export function isSymlink(path: string): boolean {
 export function readTail(path: string, maxBytes: number): string | null {
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | NOFOLLOW);
+    fd = openSync(path, READ_FLAGS);
   } catch {
     return null;
   }
@@ -58,7 +65,7 @@ export function readTail(path: string, maxBytes: number): string | null {
 export function readSmall(path: string, maxBytes = 1024 * 1024): string | null {
   let fd: number;
   try {
-    fd = openSync(path, constants.O_RDONLY | NOFOLLOW);
+    fd = openSync(path, READ_FLAGS);
   } catch {
     return null;
   }
@@ -85,7 +92,7 @@ export function readJsonSafe<T>(path: string, maxBytes?: number): T | null {
 
 /** Atomic write: exclusive temp file in the same directory, then rename over the target. */
 export function writeAtomic(path: string, text: string, mode = 0o600): void {
-  mkdirSync(dirname(path), { recursive: true });
+  mkdirSync(dirname(path), { recursive: true, mode: dirMode(mode) });
   const tmp = join(dirname(path), `.${basename(path)}.${randomBytes(6).toString("hex")}.tmp`);
   const fd = openSync(
     tmp,
@@ -107,12 +114,8 @@ export function writeAtomic(path: string, text: string, mode = 0o600): void {
 
 /** Appends without following a symlink at `path`. Rotates the file past `rotateBytes`. */
 export function appendSafe(path: string, text: string, rotateBytes = 5 * 1024 * 1024): void {
-  mkdirSync(dirname(path), { recursive: true });
-  try {
-    if (statSync(path).size > rotateBytes && !isSymlink(path)) renameSync(path, `${path}.1`);
-  } catch {
-    // missing file: nothing to rotate
-  }
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  rotateIfLarge(path, rotateBytes);
   const fd = openSync(
     path,
     constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | NOFOLLOW,
@@ -122,6 +125,41 @@ export function appendSafe(path: string, text: string, rotateBytes = 5 * 1024 * 
     writeSync(fd, text);
   } finally {
     closeSync(fd);
+  }
+}
+
+/**
+ * Moves `path` to `path.1` once it is over `rotateBytes`. Concurrent writers (40 hooks at once)
+ * all see the big file at the same moment; without a guard each of them would rename in turn and
+ * the later renames would move the fresh, nearly empty file over the rotated one, losing lines.
+ * One writer claims the rotation with an exclusive marker, re-checks the size, and the rest skip.
+ */
+function rotateIfLarge(path: string, rotateBytes: number): void {
+  try {
+    if (statSync(path).size <= rotateBytes || isSymlink(path)) return;
+  } catch {
+    return; // missing file: nothing to rotate
+  }
+  const marker = `${path}.rotating`;
+  let fd: number;
+  try {
+    fd = openSync(marker, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
+  } catch {
+    // Another writer is rotating right now (or a crash left a marker behind; clear it if old).
+    try {
+      if (Date.now() - statSync(marker).mtimeMs > 60_000) rmSync(marker, { force: true });
+    } catch {
+      // gone already
+    }
+    return;
+  }
+  closeSync(fd);
+  try {
+    if (statSync(path).size > rotateBytes) renameSync(path, `${path}.1`);
+  } catch {
+    // someone else won after all
+  } finally {
+    rmSync(marker, { force: true });
   }
 }
 

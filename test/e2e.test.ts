@@ -10,16 +10,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { sh, tempRepo } from "./helpers.js";
 
 const ROOT = resolve(__dirname, "..");
 const CLI = join(ROOT, "dist", "cli.js");
 const FAKE = join(ROOT, "scripts", "fake-agent.mjs");
-
-beforeAll(() => {
-  execFileSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: ROOT });
-}, 60_000);
 
 interface World {
   repo: string;

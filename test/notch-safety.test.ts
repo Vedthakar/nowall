@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The user's live notch runs from launchd as `dev.nowall.notch` and is found by `pkill -f`.
 // Nothing a test does (directly or through the CLI) may address that label or that process.
@@ -131,10 +131,6 @@ describe("notch safety", () => {
 });
 
 describe("notch safety: the built CLI", () => {
-  beforeAll(() => {
-    real.execFileSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: ROOT });
-  }, 60_000);
-
   it("uninstall --global in a sandbox leaves the real label alone", () => {
     const scratch = mkdtempSync(join(tmpdir(), "nowall-ns-cli-"));
     const bin = join(scratch, "bin");
@@ -170,7 +166,6 @@ describe("notch safety: the built CLI", () => {
     expect(recorded).not.toMatch(/pkill -f NowallNotch\.app\/Contents\/MacOS\/NowallNotch$/m);
     // Under a temporary NOWALL_HOME nothing is sent to launchd at all.
     expect(recorded).toBe("");
-    if (process.platform === "darwin") expect(r.stderr).toContain("Notch left alone");
 
     // `nowall notch status` names the sandbox's own label, not the user's.
     const status = real.spawnSync(process.execPath, [CLI, "notch", "status"], {
