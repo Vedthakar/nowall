@@ -6,7 +6,10 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["test/**/*.test.ts"],
-    testTimeout: 30_000,
+    globalSetup: ["test/global-setup.ts"],
+    testTimeout: 60_000,
+    // Each worker spawns many real processes; too many at once starves vitest's own messaging.
+    poolOptions: { forks: { maxForks: 4 } },
     env: { NOWALL_NO_LAUNCHD: "1" },
   },
 });
