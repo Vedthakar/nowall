@@ -23,7 +23,7 @@ cat > "$OUT/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>nowall</string>
   <key>CFBundleExecutable</key><string>NowallNotch</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.1.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
 </dict>
