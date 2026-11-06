@@ -25,7 +25,7 @@ nowall runs entirely on your computer. It has no account, server or telemetry, a
 
 - **Node.js 20 or newer** and **git**
 - **macOS 13 or newer** for the notch (Apple Silicon or Intel)
-- **Linux:** failover and all commands work, but there is no notch yet
+- **Linux:** the CLI and failover are built to work but haven't been tested there yet, and there is no notch
 - **Windows:** not supported yet
 - **A git repository:** nowall works inside git repos and ignores other folders
 - **At least two agents** for failover, for example Claude Code and the Cursor CLI

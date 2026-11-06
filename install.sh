@@ -21,7 +21,7 @@ if ! command -v git >/dev/null 2>&1; then
 fi
 case "$(uname)" in
   Darwin) ;;
-  Linux) say "Linux: failover works, but the notch is macOS only for now." ;;
+  Linux) say "Linux: the notch is macOS only, and Linux support is untested so far. Please report problems." ;;
   *)
     say "nowall supports macOS and Linux only for now."
     exit 1
