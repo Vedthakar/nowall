@@ -1,7 +1,5 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { createInterface } from "node:readline/promises";
 import {
   KEY_ENV,
   accountEnv,
@@ -9,8 +7,13 @@ import {
   accountName,
   addAccount,
   allAccounts,
+  askHidden,
+  loginArgs,
+  nextLabel,
+  profileFolder,
   profilePath,
   removeAccount,
+  secretStoreName,
   setOrder,
   supportsExtraAccounts,
   validLabel,
@@ -23,12 +26,15 @@ import {
   refreshAgents,
   runAccountLogin,
   runAccountVerify,
+  verifyAccounts,
 } from "./agents.js";
 import { runDemo } from "./demo.js";
 import { readJsonSafe } from "./fsafe.js";
 import { checkpoint, listCheckpoints, repoRoot, restore } from "./git.js";
 import { handleHook, trustedRoot } from "./hooks.js";
 import { runInit, runUninstall } from "./init.js";
+import { runOpen } from "./open.js";
+import { spawn, spawnSync } from "./proc.js";
 import { agentName } from "./prompt.js";
 import { AGENT_IDS, type AgentId, accountAgent, isAgentId } from "./schemas.js";
 import {
@@ -41,19 +47,40 @@ import {
 } from "./session.js";
 import { notchStatus, runLogs, runSetup, runStatusline, startNotch, stopNotch } from "./setup.js";
 import { isTrustedRepo, loadConfig, loadState, saveConfig } from "./state.js";
+import { updateStatus } from "./status.js";
 import { writeSummary } from "./summary.js";
-import { type Deps, failover, fmtTime, runInteractive, startSession } from "./supervisor.js";
+import {
+  type Deps,
+  failover,
+  fmtTime,
+  requestCancel,
+  runInteractive,
+  startSession,
+  watchCancelFile,
+} from "./supervisor.js";
+import { runCancel, runOff, runOn, runPause, runResume, runSwitch } from "./switch.js";
 import { runTour } from "./tour.js";
 import { runUninstallGlobal } from "./uninstall.js";
 
-const VERSION = "0.2.0";
+/** The installed package is the one place the version is written down. */
+function packageVersion(): string {
+  try {
+    const raw = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+    return (JSON.parse(raw) as { version: string }).version;
+  } catch {
+    return "unknown"; // hooks load this file, and must never fail over a version number
+  }
+}
+
+const VERSION = packageVersion();
 
 const HELP = `nowall ${VERSION}: when your coding agent hits its usage limit, the work keeps going.
 
 Usage:
-  nowall setup [--yes] [--no-accounts] [--no-notch]
-                              turn nowall on for every project, find your agents, add extra
-                              accounts, start the notch (about 30 seconds)
+  nowall setup [--cli] [--yes] [--no-accounts] [--no-notch]
+                              turn nowall on for every project: opens the setup window on a Mac
+                              (--cli stays in the terminal), finds your agents, sets their
+                              priority and the hotkey, starts the notch
   nowall tour                 what nowall does, how to read the notch, the commands
   nowall init                 set up just this repo instead (hooks, consent, optional shell alias)
   nowall run <agent> [args]   run an agent under nowall (the shell alias does this for you)
@@ -62,9 +89,15 @@ Usage:
   nowall demo                 watch a simulated failover (no real agents, no usage)
   nowall logs [-f]            what a background takeover did (or is doing) in this repo
   nowall agents               which agents nowall found, sign-in, cooldowns, usage
-  nowall account add <agent> <label>   add a second login (claude, codex: own profile; cursor: API key)
+  nowall account add <agent> [label]   add a second login: opens that agent's own sign-in
   nowall account list|remove <id> [--purge]  list accounts, or forget one (--purge also deletes its login folder)
   nowall account login <id> | verify [id]    sign in again inside a profile; check every login (never prints keys)
+  nowall switch [--to <id>] [--sid <sid>] [--repo <path>] [--latest]
+                              hand a running session to the next account now
+  nowall open --sid <sid>     bring that session's chat or terminal to the front
+  nowall pause [30m|2h|1d]    no takeovers for a while (default 24 hours); nowall resume ends it
+  nowall cancel [--sid <sid>] stop a takeover that's running, keeping its edits
+  nowall off | on             no takeovers in this repo, or back on
   nowall order [id ...]       show or set the takeover priority (e.g. claude claude:work cursor)
   nowall notch [on|off|status] show or hide the macOS notch (off is remembered)
   nowall note --task "..." [--status done|todo] | --decision "..."
@@ -101,9 +134,24 @@ const CLAUDE_SUBCOMMANDS = new Set([
   "migrate-installer",
 ]);
 
+const QUICK_USAGE: Record<string, string> = {
+  switch:
+    "nowall switch [--latest] [--sid <sid>] [--repo <path>] [--to <account>]   hand a session to the next account now",
+  cancel: "nowall cancel [--sid <sid>]   stop a takeover that's running, keeping its edits",
+  open: "nowall open --sid <sid>   open a session's chat",
+  pause: "nowall pause [30m|2h|1d|until-tomorrow]   stop every takeover (no duration: 24 hours)",
+  resume: "nowall resume   end a pause",
+  off: "nowall off   stop takeovers in this repo",
+  on: "nowall on   allow takeovers in this repo again",
+};
+
+/** Value of `--name`, or undefined when missing / used as a bare flag (`--api-key` with no value). */
 function flag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
-  return i >= 0 ? args[i + 1] : undefined;
+  if (i < 0) return undefined;
+  const v = args[i + 1];
+  if (v === undefined || v.startsWith("-")) return undefined;
+  return v;
 }
 
 /**
@@ -204,6 +252,8 @@ async function cmdRun(argv: string[]): Promise<number> {
 
 /** Continues a session whose agent nowall didn't launch (opened in a new Terminal by the hook). */
 async function cmdTakeover(argv: string[]): Promise<number> {
+  // `nowall cancel` can arrive between turns too, and must still end this cleanly.
+  process.on("SIGINT", requestCancel);
   const root = trustedRoot(process.cwd());
   const from = flag(argv, "--from") ?? "";
   const session = root ? loadSession(root) : null;
@@ -217,6 +267,7 @@ async function cmdTakeover(argv: string[]): Promise<number> {
     process.stderr.write("nowall takeover: nothing to take over here.\n");
     return 1;
   }
+  watchCancelFile(root);
   if (!acquireLock(root)) {
     process.stderr.write(
       "nowall takeover: another nowall session is already running in this repo.\n",
@@ -238,8 +289,13 @@ async function cmdTakeover(argv: string[]): Promise<number> {
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
     ...(await availableAccounts()),
   };
+  // Clicking this session's bubble during a takeover opens its live log: it has no chat to go to.
+  updateStatus(session.sid, root, {
+    agent: accountAgent(from) ?? "claude",
+    origin: { kind: "takeover" },
+  });
   process.stdout.write(
-    `${accountName(from)} hit its usage limit in ${root}.\nnowall is continuing the work here. Leave the ${accountName(from)} session paused until this finishes.\n`,
+    `${session.switch ? `Switching away from ${accountName(from)} as you asked` : `${accountName(from)} hit its usage limit`} in ${root}.\nnowall is continuing the work here. Leave the ${accountName(from)} session paused until this finishes.\n`,
   );
   await failover(
     deps,
@@ -339,24 +395,6 @@ async function cmdStatus(): Promise<number> {
   return 0;
 }
 
-/** Reads a secret from the terminal without echoing it. */
-async function askHidden(question: string): Promise<string> {
-  if (!process.stdin.isTTY) return "";
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const mute = rl as unknown as { _writeToOutput: (s: string) => void };
-  const original = mute._writeToOutput.bind(rl);
-  mute._writeToOutput = (s: string) => {
-    if (s.includes(question)) original(question);
-  };
-  try {
-    const answer = await rl.question(question);
-    process.stdout.write("\n");
-    return answer.trim();
-  } finally {
-    rl.close();
-  }
-}
-
 function printAccounts(): void {
   const config = loadConfig();
   const snap = readJsonSafe<AgentsSnapshot>(agentsPath());
@@ -366,19 +404,52 @@ function printAccounts(): void {
     const info = snap?.accounts?.find((x) => x.id === a.id);
     const signed =
       info?.signedIn === false ? "not signed in" : info?.signedIn === true ? "signed in" : "";
-    const where = a.env ? Object.values(a.env)[0] : a.secret ? `API key (${a.secret.store})` : "";
+    const where = a.env ? profileFolder(a) : a.secret ? `API key (${a.secret.store})` : "";
     process.stdout.write(
       `  ${on ? `${i + 1}.` : " -"} ${a.id.padEnd(20)} ${accountName(a.id).padEnd(24)} ${[on ? "" : "off", signed, where].filter(Boolean).join("  ")}\n`,
     );
   });
   process.stdout.write(
-    "\nReorder: nowall order <id> <id> ...   Add: nowall account add <claude|codex|cursor> <label>\n",
+    "\nReorder: nowall order <id> <id> ...   Add: nowall account add <claude|codex|cursor> [label]\n",
   );
 }
 
 /** `nowall account add|remove|list`: extra logins, each in its own profile or with its own key. */
+/** Runs an agent's own sign-in. Being stopped midway runs `onStop` first, so nothing is left half done. */
+function runLogin(
+  bin: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  onStop: () => void,
+): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { stdio: "inherit", env });
+    const stop = () => {
+      child.kill("SIGTERM");
+      onStop();
+      process.exit(130);
+    };
+    process.once("SIGTERM", stop);
+    process.once("SIGINT", stop);
+    const done = (code: number | null) => {
+      process.off("SIGTERM", stop);
+      process.off("SIGINT", stop);
+      resolve(code);
+    };
+    child.on("error", () => done(null));
+    child.on("close", done);
+  });
+}
+
 async function cmdAccount(argv: string[]): Promise<number> {
-  const [sub, agentArg, label] = argv;
+  const [sub, agentArg, rawLabel] = argv;
+  const usage =
+    "usage: nowall account add <claude|codex|cursor> [label] [--api-key <key>] | remove <id> | list\n";
+  // `add` opens a real sign-in, so asking how it works or a flag it can't read must never start one.
+  if (argv.includes("--help") || argv.includes("-h")) {
+    process.stdout.write(usage);
+    return 0;
+  }
   if (sub === undefined || sub === "list" || sub === "ls") {
     printAccounts();
     return 0;
@@ -405,16 +476,21 @@ async function cmdAccount(argv: string[]): Promise<number> {
     await refreshAgents();
     return 0;
   }
-  if (sub !== "add" || !isAgentId(agentArg) || !label) {
-    process.stderr.write(
-      "usage: nowall account add <claude|codex|cursor> <label> [--api-key <key>] | remove <id> | list\n",
-    );
+  if (sub !== "add" || !isAgentId(agentArg)) {
+    process.stderr.write(usage);
+    return 2;
+  }
+  const known = new Set(["--api-key", "--no-login"]);
+  const unknownFlag = argv.slice(2).find((a) => a.startsWith("-") && !known.has(a));
+  if (unknownFlag && flag(argv, "--api-key") !== unknownFlag) {
+    process.stderr.write(`nowall account add: unknown option "${unknownFlag}". Nothing added.\n`);
     return 2;
   }
   if (!supportsExtraAccounts(agentArg)) {
     process.stderr.write(`${agentName(agentArg)} doesn't support extra accounts yet.\n`);
     return 1;
   }
+  const label = rawLabel && !rawLabel.startsWith("-") ? rawLabel : nextLabel(agentArg);
   if (!validLabel(label)) {
     process.stderr.write("Label: letters, digits, - or _, up to 24 characters (e.g. work).\n");
     return 2;
@@ -427,35 +503,52 @@ async function cmdAccount(argv: string[]): Promise<number> {
     return 127;
   }
   try {
-    if (KEY_ENV[agentArg]) {
+    if (KEY_ENV[agentArg] && argv.includes("--api-key")) {
       let key = flag(argv, "--api-key") ?? process.env[KEY_ENV[agentArg] as string] ?? "";
       if (!key) {
         process.stdout.write(
-          `Cursor keeps one login per computer, so a second Cursor account uses an API key.\nCreate one while signed in to that account at https://cursor.com/settings (API keys).\nnowall keeps it in your ${process.platform === "darwin" ? "Keychain" : "config folder (0600)"} and only passes it to cursor-agent.\n`,
+          `Create a key while signed in to that account at https://cursor.com/settings (API keys).\nnowall keeps it in your ${secretStoreName()} and only passes it to cursor-agent.\n`,
         );
         key = await askHidden("Paste the API key: ");
       }
       if (!key) {
-        process.stderr.write("No key given; nothing changed.\n");
+        process.stderr.write(
+          "No key given; nothing changed. Paste one when prompted, or pass it: nowall account add cursor <label> --api-key <key>\n",
+        );
         return 1;
       }
       const account = addAccount(agentArg, label, { apiKey: key });
       process.stdout.write(`Added ${accountName(account.id)} (key in ${account.secret?.store}).\n`);
     } else {
       const account = addAccount(agentArg, label);
-      const env = { ...process.env, ...(account.env ?? {}) };
-      const loginArgs = agentArg === "claude" ? ["auth", "login"] : ["login"];
-      process.stdout.write(
-        `Created profile ${profilePath(account)}.\nSign in to the ${label} account now (this login is kept apart from your main one):\n\n`,
-      );
       if (!argv.includes("--no-login")) {
-        const r = spawnSync(bin, loginArgs, { stdio: "inherit", env });
-        if (r.status !== 0) {
-          process.stdout.write(
-            `\nLogin didn't finish. Run it later with: ${Object.entries(account.env ?? {})
-              .map(([k, v]) => `${k}=${v}`)
-              .join(" ")} ${ADAPTERS[agentArg].binary} ${loginArgs.join(" ")}\n`,
+        process.stdout.write(
+          `Sign in with the other ${agentName(agentArg)} account. This login is kept apart from your main one.\nIf the website signs you straight in to your usual account, log out there first.\n\n`,
+        );
+        // An account that didn't end up as a new, working login is taken back out, folder and all.
+        const undo = () => removeAccount(account.id, { purge: true });
+        const status = await runLogin(
+          bin,
+          loginArgs(agentArg) ?? ["login"],
+          { ...process.env, ...(account.env ?? {}) },
+          undo,
+        );
+        const fail = async (message: string, code: number): Promise<number> => {
+          undo();
+          await refreshAgents();
+          process.stderr.write(`${message}\n`);
+          return code;
+        };
+        if (status !== 0) return fail("Sign-in didn't finish, so nothing was added.", 1);
+        const [row] = await verifyAccounts([account.id]);
+        if (row?.problem?.includes("same login as")) {
+          return fail(
+            `That's the ${agentName(agentArg)} account you already have here, so nothing was added. To add a different one, log out on the website and try again.`,
+            3,
           );
+        }
+        if (row?.signedIn === false) {
+          return fail("That sign-in didn't take, so nothing was added.", 1);
         }
       }
       process.stdout.write(`\nAdded ${accountName(account.id)}.\n`);
@@ -542,11 +635,33 @@ async function main(argv: string[]): Promise<number> {
     case "order":
       return cmdOrder(rest);
     case "agents": {
-      const snap = await refreshAgents();
+      const snap = await refreshAgents(
+        undefined,
+        undefined,
+        rest.includes("--fresh") ? { force: true } : {},
+      );
       if (rest.includes("--write")) return 0;
       process.stdout.write(`${JSON.stringify(snap, null, 2)}\n`);
       return 0;
     }
+    case "switch":
+    case "cancel":
+    case "open":
+    case "pause":
+    case "resume":
+    case "off":
+    case "on":
+      // These act the moment they run, so asking how they work has to stop here.
+      if (rest.includes("--help") || rest.includes("-h")) {
+        process.stdout.write(`usage: ${QUICK_USAGE[cmd]}\n`);
+        return 0;
+      }
+      if (cmd === "switch") return runSwitch(rest);
+      if (cmd === "cancel") return runCancel(rest);
+      if (cmd === "open") return runOpen(rest);
+      if (cmd === "pause") return runPause(rest);
+      if (cmd === "resume") return runResume();
+      return cmd === "off" ? runOff() : runOn();
     case "statusline": {
       let raw = "";
       try {

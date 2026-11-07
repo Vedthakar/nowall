@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -71,7 +72,10 @@ describe("adding accounts", () => {
     expect(() => addAccount("claude", "bad label")).toThrow(/label/);
     addAccount("claude", "work");
     expect(() => addAccount("claude", "work")).toThrow(/already exists/);
-    expect(() => addAccount("cursor", "b")).toThrow(/API key/);
+    const profile = addAccount("cursor", "b");
+    expect(profile.env?.AGENT_CLI_CREDENTIAL_STORE).toBe("file");
+    expect(profile.env?.HOME).toContain("profiles");
+    expect(profile.secret).toBeUndefined();
     expect(() => addAccount("antigravity", "x")).toThrow(/does not support/);
   });
 });
@@ -132,4 +136,139 @@ describe("failover over accounts", () => {
     const off = { ...config, enabled: { ...DEFAULT_CONFIG.enabled, claude: false } };
     expect(pickNext(off, { v: 1, agents: {} }, available, [], NOW)).toBe("codex");
   });
+});
+
+describe("adding a Cursor account through the website", () => {
+  const CLI = join(process.cwd(), "dist/cli.js");
+
+  /** A cursor-agent that keeps its login in its HOME, as the real one does with the file store. */
+  function world(loginBody: string) {
+    const root = mkdtempSync(join(tmpdir(), "nowall-web-"));
+    const bin = join(root, "bin");
+    const home = join(root, "home");
+    mkdirSync(bin);
+    mkdirSync(home);
+    writeFileSync(join(home, ".who"), "main@example.com\n");
+    writeFileSync(
+      join(bin, "cursor-agent"),
+      `#!/bin/sh
+case "$1" in
+  --version) echo fake ;;
+  login) ${loginBody} ;;
+  status)
+    if [ -f "$HOME/.who" ]; then
+      if [ "$2" = "--format" ]; then echo "{\\"isAuthenticated\\":true,\\"userInfo\\":{\\"email\\":\\"$(cat "$HOME/.who")\\"}}"; else echo "Logged in"; fi
+    else
+      if [ "$2" = "--format" ]; then echo '{"isAuthenticated":false}'; else echo "Not logged in"; fi
+    fi ;;
+esac
+`,
+      { mode: 0o755 },
+    );
+    const cfg = join(root, "cfg");
+    const env = {
+      ...process.env,
+      HOME: home,
+      NOWALL_HOME: cfg,
+      NOWALL_SECRET_STORE: "file",
+      NOWALL_NO_LAUNCHD: "1",
+      PATH: `${bin}:/usr/bin:/bin`,
+    };
+    const accounts = () => {
+      const c = JSON.parse(readFileSync(join(cfg, "config.json"), "utf8")) as {
+        accounts?: { id: string }[];
+        order: string[];
+      };
+      return { ids: (c.accounts ?? []).map((a) => a.id), order: c.order };
+    };
+    return { home, cfg, env, accounts };
+  }
+  const add = (env: NodeJS.ProcessEnv, ...args: string[]) =>
+    spawnSync(process.execPath, [CLI, "account", "add", "cursor", ...args], {
+      env,
+      encoding: "utf8",
+      input: "",
+    });
+
+  it("a new account is added with no label, no key and the main login untouched", () => {
+    const w = world(`echo "second@example.com" > "$HOME/.who"`);
+    const r = add(w.env);
+    expect(r.stdout).toContain("Added Cursor (2).");
+    expect(r.status).toBe(0);
+    expect(w.accounts().ids).toEqual(["cursor:2"]);
+    expect(w.accounts().order).toContain("cursor:2");
+    expect(readFileSync(join(w.home, ".who"), "utf8")).toBe("main@example.com\n");
+    expect(readFileSync(join(w.cfg, "profiles", "cursor-2", ".who"), "utf8")).toContain("second@");
+    expect(existsSync(join(w.cfg, "secrets"))).toBe(false);
+  });
+
+  it("asking for help or passing an unknown flag never opens a sign-in", () => {
+    const w = world(`echo opened > "$HOME/.opened"`);
+    expect(add(w.env, "--help").status).toBe(0);
+    expect(add(w.env, "-h").status).toBe(0);
+    expect(add(w.env, "--nope").status).toBe(2);
+    expect(existsSync(join(w.home, ".opened"))).toBe(false);
+    expect(existsSync(join(w.cfg, "profiles"))).toBe(false);
+  });
+
+  it("stays signed in when its settings are saved in another order, as the notch saves them", () => {
+    const w = world(`echo "second@example.com" > "$HOME/.who"`);
+    expect(add(w.env, "team").status).toBe(0);
+    const path = join(w.cfg, "config.json");
+    const c = JSON.parse(readFileSync(path, "utf8"));
+    const entry = c.accounts[0];
+    entry.env = Object.fromEntries(
+      Object.entries(entry.env).sort(([a], [b]) => a.localeCompare(b)),
+    );
+    expect(Object.keys(entry.env)[0]).toBe("AGENT_CLI_CREDENTIAL_STORE");
+    writeFileSync(path, JSON.stringify(c));
+
+    const cli = (...args: string[]) =>
+      spawnSync(process.execPath, [CLI, "account", ...args], { env: w.env, encoding: "utf8" });
+    const verify = cli("verify", "cursor:team");
+    expect(verify.stdout).not.toContain("profile missing");
+    expect(verify.stdout).toContain("signed in");
+    expect(verify.stdout).not.toContain("not signed in");
+    expect(cli("list").stdout).toContain(join(w.cfg, "profiles", "cursor-team"));
+
+    expect(cli("remove", "cursor:team", "--purge").status).toBe(0);
+    expect(existsSync(join(w.cfg, "profiles", "cursor-team"))).toBe(false);
+  });
+
+  it("the same account is refused, and leaves nothing behind", () => {
+    const w = world(`echo "main@example.com" > "$HOME/.who"`);
+    const r = add(w.env, "dup");
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain("already have here");
+    expect(w.accounts().ids).toEqual([]);
+    expect(w.accounts().order).not.toContain("cursor:dup");
+    expect(existsSync(join(w.cfg, "profiles", "cursor-dup"))).toBe(false);
+  });
+
+  it("a sign-in that fails leaves nothing behind", () => {
+    const w = world("exit 1");
+    const r = add(w.env, "nope");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("nothing was added");
+    expect(w.accounts().ids).toEqual([]);
+    expect(existsSync(join(w.cfg, "profiles", "cursor-nope"))).toBe(false);
+  });
+
+  it("cancelling while waiting on the website leaves nothing behind", async () => {
+    const w = world("exec sleep 30");
+    const child = spawn(process.execPath, [CLI, "account", "add", "cursor", "wait"], {
+      env: w.env,
+      stdio: "ignore",
+    });
+    const deadline = Date.now() + 15_000;
+    while (!existsSync(join(w.cfg, "profiles", "cursor-wait")) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    await new Promise((r) => setTimeout(r, 500));
+    child.kill("SIGTERM");
+    const code = await new Promise((r) => child.on("close", r));
+    expect(code).toBe(130);
+    expect(w.accounts().ids).toEqual([]);
+    expect(existsSync(join(w.cfg, "profiles", "cursor-wait"))).toBe(false);
+  }, 30_000);
 });

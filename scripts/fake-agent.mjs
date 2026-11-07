@@ -43,7 +43,8 @@ function fireClaudeHook(event, payload) {
     .flatMap((f) => JSON.parse(readFileSync(f, "utf8")).hooks?.[event] ?? []);
   for (const group of groups) {
     for (const h of group.hooks ?? []) {
-      spawnSync("sh", ["-c", h.command], {
+      spawnSync(h.command, {
+        shell: true,
         input: JSON.stringify({ hook_event_name: event, cwd, session_id: "fake", ...payload }),
         env: process.env,
       });
@@ -145,6 +146,7 @@ if (!headless) {
   out({ type: "thread.started", thread_id: `codex-thread-${n}` });
   out({ type: "turn.started" });
   doWork();
+  if (turn.sleepMs) await new Promise((r) => setTimeout(r, turn.sleepMs));
   if (turn.text) out({ type: "item.completed", item: { type: "agent_message", text: turn.text } });
   const changes = Object.keys(turn.files ?? {}).map((path) => ({ path, kind: "add" }));
   if (changes.length) out({ type: "item.completed", item: { type: "file_change", changes } });

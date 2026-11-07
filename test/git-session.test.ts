@@ -77,7 +77,9 @@ describe("checkpoints", () => {
     const after = checkpoint(repo, "s", 1, "after");
     expect(changedFiles(repo, base.commit, after.commit)).toEqual(["README.md"]);
     restore(repo, base.commit);
-    expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("# demo\n");
+    // Git checks files out with the user's line endings: CRLF under Windows' usual core.autocrlf.
+    const restored = readFileSync(join(repo, "README.md"), "utf8");
+    expect(restored.replace(/\r\n/g, "\n")).toBe("# demo\n");
   });
 
   it("excludeLocally is idempotent and leaves .gitignore alone", () => {

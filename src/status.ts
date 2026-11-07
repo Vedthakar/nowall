@@ -29,6 +29,18 @@ export interface ChildStatus {
   seenAt?: string;
 }
 
+/** Where a session lives, so the notch can take you back to it. */
+export interface SessionOrigin {
+  /** "claude-desktop", "cursor-ide", "terminal" or "takeover". */
+  kind: "claude-desktop" | "cursor-ide" | "terminal" | "takeover";
+  /** TERM_PROGRAM of the terminal, e.g. "Apple_Terminal", "iTerm.app", "vscode". */
+  term?: string;
+  /** Bundle id of the app that hosts the terminal or chat. */
+  bundle?: string;
+  /** Controlling terminal, e.g. "/dev/ttys004". */
+  tty?: string;
+}
+
 export interface SessionStatus {
   v: 1;
   sid: string;
@@ -51,6 +63,10 @@ export interface SessionStatus {
   children?: ChildStatus[];
   /** True when the agent's own turn ended while children were still running. */
   turnEnded?: boolean;
+  /** Where to go when the session's bubble is clicked. */
+  origin?: SessionOrigin;
+  /** The session's folder when it isn't a git repo: shown in the notch, but no failover. */
+  noRepo?: boolean;
 }
 
 /** A child that has been silent this long no longer pins its parent to `working`. */

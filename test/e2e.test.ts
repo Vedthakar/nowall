@@ -307,6 +307,46 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
     expect(codexCalls[1]?.args.at(-1)).toContain("[1] a");
   });
 
+  it("skips an account that runs out of usage, whatever its place in the order", () => {
+    const w = world(
+      {
+        claude: [CLAUDE_LIMITED],
+        cursor: [
+          { limit: "You've hit your usage limit" },
+          { text: "All done.", files: { "src/z.ts": "// z\n" }, tasks: done(["a"]) },
+        ],
+      },
+      {
+        order: ["claude", "cursor:second", "cursor"],
+        accounts: [
+          {
+            id: "cursor:second",
+            agent: "cursor",
+            label: "second",
+            env: { AGENT_CLI_CREDENTIAL_STORE: "file", HOME: "PROFILE" },
+          },
+        ],
+      },
+    );
+    const home = w.env.NOWALL_HOME as string;
+    const profile = join(home, "profiles", "cursor-second");
+    mkdirSync(profile, { recursive: true });
+    const cfg = JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+    cfg.accounts[0].env.HOME = profile;
+    writeFileSync(join(home, "config.json"), JSON.stringify(cfg));
+
+    const r = run(w);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toMatch(/Cursor \(second\): .*hit /);
+    expect(r.stdout).toContain("The last part was built by Cursor because Cursor (second) hit");
+    expect(calls(w).filter((c) => c.name === "cursor")).toHaveLength(2);
+
+    // Only the account that ran out cools down, so the next takeover skips it too.
+    const state = JSON.parse(readFileSync(join(home, "state.json"), "utf8"));
+    expect(state.agents["cursor:second"]?.cooldownUntil).toBeTruthy();
+    expect(state.agents.cursor?.cooldownUntil).toBeUndefined();
+  });
+
   it("stops when the agent stops making changes (no runaway loop)", () => {
     const w = world(
       {
@@ -318,6 +358,37 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
     const r = run(w);
     expect(r.stdout).toContain("Stopped: the agent stopped making changes.");
     expect(calls(w).filter((c) => c.name === "codex")).toHaveLength(2);
+  });
+
+  it("stops a turn when asked to, and keeps what was done", async () => {
+    const w = world({ claude: [CLAUDE_LIMITED], codex: [{ sleepMs: 60_000 }] });
+    const child = spawn(process.execPath, [CLI, "run", "claude"], { cwd: w.repo, env: w.env });
+    let out = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+    });
+    const started = Date.now();
+    while (!out.includes("continuing in Codex") && Date.now() - started < 20_000) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 500));
+    child.kill("SIGINT");
+    await new Promise((r) => child.on("close", r));
+    expect(out).toContain("Stopped by you.");
+    expect(out).toContain("(stopped by you)");
+    expect(out).not.toContain("(finished)");
+    expect(Date.now() - started).toBeLessThan(40_000);
+  });
+
+  it("stops a turn that runs past the time limit", () => {
+    const w = world(
+      { claude: [CLAUDE_LIMITED], codex: [{ sleepMs: 60_000 }] },
+      { stop: { maxTurns: 10, maxMinutes: 0.05, noDiffTurns: 2 } },
+    );
+    const started = Date.now();
+    const r = run(w);
+    expect(r.stdout).toContain("Stopped: reached the time limit.");
+    expect(Date.now() - started).toBeLessThan(40_000);
   });
 
   it("pauses with the earliest reset when every agent is limited", () => {

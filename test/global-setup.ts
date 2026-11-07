@@ -3,5 +3,7 @@ import { resolve } from "node:path";
 
 /** Builds dist/ once before any test file runs; the end-to-end tests drive the real CLI. */
 export default function setup(): void {
-  execFileSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: resolve(__dirname, "..") });
+  const root = resolve(__dirname, "..");
+  const tsc = resolve(root, "node_modules", "typescript", "bin", "tsc");
+  execFileSync(process.execPath, [tsc, "-p", "tsconfig.build.json"], { cwd: root });
 }

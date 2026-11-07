@@ -1,12 +1,13 @@
-import { spawn } from "node:child_process";
 import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { accountEnv, accountName, allAccounts } from "./accounts.js";
 import type { AgentAdapter } from "./adapters/types.js";
-import { readJsonSafe, sanitizeTerminal } from "./fsafe.js";
+import { readJsonSafe, sanitizeTerminal, writeAtomic } from "./fsafe.js";
 import { checkpoint, shortStat, snapshotTree } from "./git.js";
 import { isAuthError } from "./limits.js";
 import { buildPacket } from "./packet.js";
+import { isWindows, needsCmdExe, spawn, stopChild } from "./proc.js";
 import { agentName, continuePrompt, masterPrompt } from "./prompt.js";
 import { loadEnvValues, redact } from "./redact.js";
 import {
@@ -23,6 +24,8 @@ import {
   type StopReason,
   appendJournal,
   archiveTasks,
+  cancelPath,
+  handoffDir,
   loadSession,
   newSessionId,
   readTasks,
@@ -30,7 +33,7 @@ import {
   saveSession,
   signalPath,
 } from "./session.js";
-import { earliestReset, loadState, pickNext, recordLimit, saveState } from "./state.js";
+import { configDir, earliestReset, loadState, pickNext, recordLimit, saveState } from "./state.js";
 import { type Phase, describeTool, updateStatus } from "./status.js";
 
 export interface Deps {
@@ -122,8 +125,8 @@ export async function runInteractive(
       if (sig.to) session.switch.to = sig.to;
       saveSession(deps.root, session);
     }
-    child.kill("SIGTERM");
-    setTimeout(() => child.exitCode === null && child.kill("SIGKILL"), 3000).unref();
+    stopChild(child);
+    setTimeout(() => child.exitCode === null && stopChild(child, true), 3000).unref();
   };
   const timer = setInterval(readSignal, deps.pollMs ?? 500);
 
@@ -148,6 +151,23 @@ export interface TurnResult {
   authError: boolean;
   exitCode: number;
   interrupted: boolean;
+  /** Stopped because the takeover reached its time limit. */
+  timedOut: boolean;
+}
+
+/** Windows caps a whole command line at 32,767 characters; this leaves room for the flags. */
+const WINDOWS_PROMPT_LIMIT = 28_000;
+
+/**
+ * The prompt to put on an agent's command line on Windows. One that is too long for the command
+ * line, or that would have to pass through cmd.exe (which can't carry newlines and would parse the
+ * text), goes in a file in .handoff/ instead, and the agent is told to read it.
+ */
+export function fitPrompt(root: string, sid: string, prompt: string, viaCmdExe: boolean): string {
+  if (!viaCmdExe && prompt.length <= WINDOWS_PROMPT_LIMIT) return prompt;
+  const name = `prompt-${sid}.md`;
+  writeAtomic(join(handoffDir(root), name), prompt);
+  return `Your full instructions are in .handoff/${name}. Read that file and follow it exactly.`;
 }
 
 export async function runHeadlessTurn(
@@ -158,10 +178,12 @@ export async function runHeadlessTurn(
   prompt: string,
   resumeId: string | undefined,
   account: AccountId = adapter.id,
+  deadlineMs = Number.POSITIVE_INFINITY,
 ): Promise<TurnResult> {
+  const sendable = isWindows ? fitPrompt(deps.root, session.sid, prompt, needsCmdExe(bin)) : prompt;
   const opts = resumeId
-    ? { prompt, resumeId, yolo: deps.config.yolo }
-    : { prompt, yolo: deps.config.yolo };
+    ? { prompt: sendable, resumeId, yolo: deps.config.yolo }
+    : { prompt: sendable, yolo: deps.config.yolo };
   const { args, env } = adapter.headless(opts);
   const child = spawn(bin, args, {
     cwd: deps.root,
@@ -173,12 +195,13 @@ export async function runHeadlessTurn(
       NOWALL_SID: session.sid,
       NOWALL_AGENT: adapter.id,
       NOWALL_ROOT: deps.root,
+      NOWALL_HOME: configDir(), // a Cursor account's private HOME must not move nowall's folder
     },
   });
   let interrupted = false;
   const onInt = () => {
     interrupted = true;
-    child.kill("SIGTERM");
+    stopChild(child);
   };
   process.once("SIGINT", onInt);
 
@@ -188,7 +211,20 @@ export async function runHeadlessTurn(
     authError: false,
     exitCode: 0,
     interrupted: false,
+    timedOut: false,
   };
+  // The time limit has to hold inside a turn too: one turn can go on for as long as the agent likes.
+  // setTimeout can't wait longer than about 24.8 days; the limit is capped well below that.
+  const left = Math.min(deadlineMs - deps.now().getTime(), 2 ** 31 - 1);
+  const watchdog = setTimeout(
+    () => {
+      result.timedOut = true;
+      stopChild(child);
+      setTimeout(() => child.exitCode === null && stopChild(child, true), 3000).unref();
+    },
+    Math.max(left, 0),
+  );
+  watchdog.unref();
   const errorTexts: string[] = [];
   let sawDone = false;
   let lastStatus = 0;
@@ -240,6 +276,7 @@ export async function runHeadlessTurn(
     child.on("close", (code) => resolve(code ?? 1));
     child.on("error", () => resolve(127));
   });
+  clearTimeout(watchdog);
   process.off("SIGINT", onInt);
   result.interrupted = interrupted;
   if (!sawDone && result.exitCode !== 0) result.isError = true;
@@ -253,6 +290,30 @@ export async function runHeadlessTurn(
   }
   if (!result.limit && result.isError) result.authError = errorTexts.some(isAuthError);
   return result;
+}
+
+let cancelRequested = false;
+
+/** `nowall cancel` reached this takeover: it ends before the next turn starts. */
+/**
+ * Windows can't send a process a signal it can handle: `process.kill` just ends it, with no last
+ * checkpoint and the agent left running. So `nowall cancel` leaves a file there, and this turns it
+ * into the same SIGINT handling as everywhere else.
+ */
+export function watchCancelFile(root: string, pollMs = 500): NodeJS.Timeout {
+  const path = cancelPath(root);
+  rmSync(path, { force: true }); // left by a takeover that ended before it was read
+  const timer = setInterval(() => {
+    if (!existsSync(path)) return;
+    rmSync(path, { force: true });
+    process.emit("SIGINT", "SIGINT");
+  }, pollMs);
+  timer.unref();
+  return timer;
+}
+
+export function requestCancel(): void {
+  cancelRequested = true;
 }
 
 /** Stands in for the limit when the user switched on purpose; never recorded as a cooldown. */
@@ -392,8 +453,18 @@ export async function failover(
     let handedOff = false;
 
     while (!handedOff) {
+      if (cancelRequested) return finish(deps, session, "interrupted");
       turns += 1;
-      const r = await runHeadlessTurn(deps, session, adapter, bin, prompt, resumeId, next);
+      const r = await runHeadlessTurn(
+        deps,
+        session,
+        adapter,
+        bin,
+        prompt,
+        resumeId,
+        next,
+        startMs + deps.config.stop.maxMinutes * 60_000,
+      );
       if (r.sessionId) {
         resumeId = r.sessionId;
         const seg = session.segments.at(-1);
@@ -401,6 +472,7 @@ export async function failover(
         saveSession(deps.root, session);
       }
       if (r.interrupted) return finish(deps, session, "interrupted");
+      if (r.timedOut) return finish(deps, session, "max-time");
 
       if (r.authError) {
         // Not signed in: drop this account for the rest of the run and try the next one.
@@ -506,7 +578,12 @@ function finish(deps: Deps, session: Session, reason: StopReason): StopReason {
   updateStatus(session.sid, deps.root, {
     agent: last?.agent ?? "claude",
     phase,
-    detail: phase === "done" ? "Task complete" : `Stopped: ${reason}`,
+    detail:
+      phase === "done"
+        ? "Task complete"
+        : reason === "interrupted"
+          ? "Stopped by you. Its edits are kept"
+          : `Stopped: ${reason}`,
     shares: agentShares(deps.root, session),
   });
   return reason;

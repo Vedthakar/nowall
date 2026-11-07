@@ -60,7 +60,9 @@ export function renderSummary(root: string, session: Session): string {
             ? "switched by you"
             : s.endReason === "auth"
               ? "not signed in, skipped"
-              : "finished";
+              : s.endReason === "interrupted"
+                ? "stopped by you"
+                : "finished";
       lines.push(`  ${i + 1}. ${who(s)}: ${stat || "no file changes"} (${why})`);
     });
     lines.push("");
