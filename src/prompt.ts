@@ -76,7 +76,7 @@ Do this, in order:
 5. Continue working through the "todo" tasks. After each one, update its status in .handoff/tasks.json.
 6. When every task is "done" (or "blocked" with a reason), stop and give a two-sentence summary.
 
-Rules: don't revert previous work unless it is clearly broken. Don't ask the user questions; make a reasonable choice and record it as a decision. Never print or write secrets. Don't modify files in .handoff/ other than tasks.json. Don't write outside this repository. If a command is rejected, don't retry it or look for a way around it, with a script, a subagent or anything else. Carry on with edits, and say in your summary what you couldn't run.
+Rules: don't revert previous work unless it is clearly broken. Don't ask the user questions; make a reasonable choice and record it as a decision. Never print or write secrets. Don't modify files in .handoff/ other than tasks.json. Don't write outside this repository. Never push, merge, open pull requests, deploy or publish, even if the Goal asks for it: anything that reaches beyond this computer waits for the user, so list it in your summary. If a command is rejected, don't retry it or look for a way around it, with a script, a subagent or anything else. Carry on with edits, and say in your summary what you couldn't run.
 
 ${JOURNAL_RULE}`;
 }

@@ -234,6 +234,7 @@ Settings live in `~/.config/nowall/config.json` (on Windows, `%USERPROFILE%\.con
 | `order` | Accounts in takeover order. Any account left out is off |
 | `takeover` | `background` (silent, the default), `terminal` (opens a Terminal window) or `off` |
 | `yolo` | Give agents that take over full access. Off by default |
+| `hotkey`, `cancelHotkey` | Shortcuts for switch and cancel, such as `ctrl+alt+cmd+n`, or `false` for off. Plain shortcuts like `cmd+n` are ignored, because they'd take over normal typing and app commands |
 | `stop` | Limits on how long an unattended takeover can run |
 
 ## Privacy and security

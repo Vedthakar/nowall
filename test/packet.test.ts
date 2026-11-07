@@ -93,6 +93,8 @@ describe("buildPacket + masterPrompt", () => {
     // An edit-only takeover can't run commands, and must not spend usage hunting for a way around that.
     expect(prompt).toContain("If a command is rejected, this session only allows edits");
     expect(prompt).toContain("don't retry it or look for a way around it");
+    // Nobody is watching a takeover, so nothing it does may leave this computer.
+    expect(prompt).toContain("Never push, merge, open pull requests, deploy or publish");
   });
 
   it("reconciles the existing tasks.json into hints", () => {
