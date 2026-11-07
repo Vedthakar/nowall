@@ -100,7 +100,7 @@ Usage:
   nowall cancel [--sid <sid>] stop a takeover that's running, keeping its edits
   nowall off | on             no takeovers in this repo, or back on
   nowall order [id ...]       show or set the takeover priority (e.g. claude claude:work cursor)
-  nowall notch [on|off|status] show or hide the macOS notch (off is remembered)
+  nowall notch [on|off|status] show or hide the notch or Windows tray app (off is remembered)
   nowall note --task "..." [--status done|todo] | --decision "..."
   nowall uninstall [--global]  remove this repo's hooks (or, with --global, everything setup added)
     --global [--yes] [--purge|--keep-data] [--repos] [--npm] [--dry-run]   purge: config, profiles, Keychain items

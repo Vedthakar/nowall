@@ -1,6 +1,6 @@
 # nowall
 
-Automatic failover for AI coding agents on macOS and Windows, with a live status notch on macOS.
+Automatic failover for AI coding agents on macOS and Windows, with a live status notch on macOS and a tray app on Windows.
 
 When Claude Code hits its usage limit mid-task, nowall saves your work and continues the task in the next coding agent you're signed in to, with the full context. A small notch on the edge of your screen shows what each agent is doing.
 
@@ -28,7 +28,7 @@ nowall runs entirely on your computer. It has no account, server or telemetry, a
 - **Node.js 20 or newer** and **git**
 - **macOS 13 or newer** for the notch (Apple Silicon or Intel)
 - **Linux:** the CLI and failover are built to work but haven't been tested there yet, and there is no notch
-- **Windows 10 or 11:** the CLI and failover, with Git for Windows. There is no notch yet. See [Windows](#windows)
+- **Windows 10 or 11:** the CLI, failover and a tray app in place of the notch, with Git for Windows. See [Windows](#windows)
 - **A git repository for failover:** chats in other folders still show in the notch, but can't be taken over
 - **At least two agents** for failover, for example Claude Code and the Cursor CLI
 
@@ -142,7 +142,7 @@ A finished chat keeps its check mark until you click it. When more chats are run
 
 Windows support is new. The CLI, hooks, failover, multiple accounts, undo and uninstall are built to work as they do on a Mac, but so far they've only been tested with simulated agents, not real agent installs. Reports are welcome. A few things differ:
 
-- **No notch or setup window yet.** Setup runs in the terminal. Use `nowall status` to see where things stand and `nowall logs -f` to follow a takeover.
+- **A tray app instead of the notch.** See [below](#the-tray-app). Setup runs in the terminal.
 - **Takeovers always run in the background.** `"takeover": "terminal"` falls back to `background`.
 - **`nowall open` only prints the session's folder**, and the `claude` shell shortcut from `nowall init --alias` isn't available. Use `nowall run claude`.
 - **In PowerShell, use `nowall.cmd`** if `nowall` is blocked by your execution policy.
@@ -150,6 +150,30 @@ Windows support is new. The CLI, hooks, failover, multiple accounts, undo and un
 - **Claude Code may flash a console window** each time it runs a hook. That comes from how Claude Code starts hooks on Windows, not from nowall.
 - **Cursor's own hooks have open Windows bugs,** especially with Git Bash, so its chats may not show up in `nowall status`. Cursor can still take over a task.
 
+
+### The tray app
+
+<img src="docs/images/tray-panel.png" alt="The nowall tray panel on Windows, listing three sessions with Switch and Cancel switch buttons, then each account's usage" width="350">
+
+`nowall setup` puts an icon in your system tray, next to the clock. Windows may tuck it behind the ^ arrow; drag it out to keep it in view. Its dot shows the most urgent thing going on:
+
+| Dot | Meaning |
+|---|---|
+| Green | An agent is working |
+| Orange | An agent needs your input, or a switch is under way |
+| Blue | A chat finished, and you haven't opened the panel since |
+| Gray | Nothing is happening |
+
+- **Click the icon** to see each session's repo and current activity, who built what, task progress, and every account's usage and cooldown.
+- **Switch...** on a running session hands it to the next account, or one you choose. **Cancel switch** stops a takeover and keeps its edits, and `nowall undo` can roll them back.
+- **Right-click the icon** for the same actions on the latest session, to refresh agents, or to quit.
+- **`nowall notch off`** quits it and removes it from startup, until you run `nowall notch on`. Failover keeps working either way.
+
+It only reads the files nowall already writes and only acts by running `nowall`, so it adds no server or background service. `nowall setup` compiles it on your computer with the C# compiler built into Windows, which takes a moment the first time and adds nothing to install.
+
+It does less than the Mac notch for now: no hotkeys, no Settings window (use `nowall order` and `nowall account add`), no onboarding window, and sessions show their repo name instead of their chat title. Clicking a session doesn't open its chat. If your company's security software blocks `csc.exe`, the tray app won't build. nowall tells you so during setup, and everything else still works.
+
+So far the tray app has only run on GitHub's Windows test machines, with simulated agents. Those tests don't click the tray icon itself or check how it looks across display scales. Reports are welcome.
 ## How failover works
 
 1. **Record.** Hooks add short lines to `.handoff/journal.jsonl` in each repo: your requests, files edited, commands run, and finished tasks. This costs roughly 100–300 tokens per session. The folder is git-ignored and secrets are redacted.
@@ -280,7 +304,7 @@ Add `--dry-run` to either command to see what would change. Your own hooks and s
 - Failover starts from Claude Code. A limit inside the Cursor IDE or an interactive Codex session doesn't start one yet.
 - A takeover runs in the background, and you can't type to it. Run the resume command in the summary to continue interactively.
 - The original Claude session isn't closed by a background takeover, so it can resume after its limit resets.
-- The notch isn't available on Linux or Windows yet.
+- The notch isn't available on Linux yet.
 
 See the [roadmap](docs/ROADMAP.md) for what's planned.
 
@@ -298,7 +322,7 @@ npm run lint && npm run typecheck && npm test
 npm run stress
 ```
 
-Tests never use real agents: `scripts/fake-agent.mjs` reproduces their output formats, limit errors and expired logins. `npm run build:notch` builds the macOS app and needs the Xcode command line tools. CI also installs nowall with `install.ps1` on Windows and runs `npm run smoke:windows`, which runs the hooks under cmd.exe, PowerShell and Git Bash.
+Tests never use real agents: `scripts/fake-agent.mjs` reproduces their output formats, limit errors and expired logins. `npm run build:notch` builds the macOS app and needs the Xcode command line tools. CI also installs nowall with `install.ps1` on Windows and runs `npm run smoke:windows`, which runs the hooks under cmd.exe, PowerShell and Git Bash, and `npm run smoke:windows-tray`, which builds the tray app and presses its buttons against status files from nowall's real hooks and a takeover by a simulated agent.
 
 ## Report an issue
 

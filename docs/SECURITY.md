@@ -36,3 +36,4 @@ nowall runs with the user's privileges, inside repositories the user may not ful
 - A repo's own committed agent config (e.g. `.claude/settings.json` hooks) is the agent's trust decision, not nowall's.
 - Headless agents run with edit-only permissions by default, but they can still be prompt-injected by repository content like any coding agent. `--yolo` widens that blast radius and is opt-in.
 - The notch app is ad-hoc signed, not notarized. That's fine for npm installs; a signed, notarized build is needed before distributing it as a download.
+- The Windows tray app is compiled on the user's machine from source in the npm package, into their own config folder. It has no network code, shows status text only as text, and runs only `node <nowall cli>`, with no shell in between, so a repo name or status detail can't become a command.

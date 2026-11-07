@@ -31,6 +31,7 @@ import {
   refreshAgents,
 } from "./agents.js";
 import { writeAtomic } from "./fsafe.js";
+import { startTray, stopTray, trayRunning, trayStatusLines } from "./notch-windows.js";
 import { gitBash, isWindows, spawnSync } from "./proc.js";
 import type { AgentId } from "./schemas.js";
 import { configDir, loadConfig, saveConfig } from "./state.js";
@@ -80,7 +81,8 @@ Setting up will:
     snapshots (refs/nowall/...). Your branches, index and files are never touched.
   • When an agent hits its limit, quietly continue in the next agent you're signed in to, with the
     same context. No pop-ups; progress shows in the notch. Undo any step with \`nowall undo\`.
-  • Start the nowall notch (macOS): a small black tab on the right edge of your screen.
+  • Start the nowall notch: on a Mac a small black tab on the right edge of your screen, on Windows
+    a tray icon. Both only read nowall's own files.
 nowall never reads, stores or sends your credentials. Undo all of this with: nowall uninstall --global`;
 
 export function packageRoot(): string {
@@ -206,7 +208,9 @@ const xml = (s: string) =>
 
 /** True while a notch process is running (from launchd or opened directly). */
 export function notchRunning(): boolean {
-  if (process.platform !== "darwin" || noLaunchd() || tempHomeProblem()) return false;
+  if (noLaunchd() || tempHomeProblem()) return false;
+  if (isWindows) return trayRunning(configDir());
+  if (process.platform !== "darwin") return false;
   return spawnSync("pgrep", ["-f", notchPattern()], { stdio: "ignore" }).status === 0;
 }
 
@@ -235,8 +239,19 @@ export function tempHomeProblem(): string | null {
 /** Installs (or refreshes) the login item that keeps the notch running, starts it, and verifies it. */
 export function startNotch(home = homedir()): string {
   if (noLaunchd()) return "Notch skipped (NOWALL_NO_LAUNCHD).";
+  if (isWindows) {
+    const problem = tempHomeProblem();
+    if (problem) return `Tray app not started: ${problem}`;
+    return startTray({
+      source: join(packageRoot(), "notch", "windows", "NowallTray.cs"),
+      home: configDir(),
+      node: process.execPath,
+      cli: realpathSync(cliPath()),
+      label: notchLabel(),
+    });
+  }
   if (process.platform !== "darwin") {
-    return "The notch is macOS-only for now, so `nowall status` and `nowall logs -f` show what's happening. Failover works the same without it.";
+    return "The notch isn't available on Linux yet, so `nowall status` and `nowall logs -f` show what's happening. Failover works the same without it.";
   }
   const app = notchApp();
   if (!app) return "Notch app not found in this build (it is built on macOS with Xcode tools).";
@@ -298,6 +313,13 @@ ${[app, ...args].map((a) => `    <string>${xml(a)}</string>`).join("\n")}
  * NOWALL_NO_LAUNCHD or a temporary NOWALL_HOME it just removes the plist.
  */
 export function stopNotch(home = homedir()): void {
+  if (isWindows) {
+    if (noLaunchd()) return;
+    const problem = tempHomeProblem();
+    if (problem) process.stderr.write(`Tray app left alone: ${problem}\n`);
+    else stopTray(configDir(), notchLabel());
+    return;
+  }
   if (process.platform !== "darwin") return;
   rmSync(plistPath(home), { force: true });
   if (noLaunchd()) return;
@@ -314,6 +336,13 @@ export function stopNotch(home = homedir()): void {
 /** `nowall notch status`: what's installed, where it reads from, and whether it's running. */
 export function notchStatus(home = homedir()): string {
   const lines: string[] = [];
+  if (isWindows) {
+    lines.push(...trayStatusLines(configDir(), notchLabel()));
+    lines.push(
+      `Data:        ${existsSync(join(configDir(), "agents.json")) ? "agents.json present" : "no agents.json yet (run nowall setup)"}`,
+    );
+    return lines.join("\n");
+  }
   lines.push(`App:         ${notchApp() ?? "not in this build"}`);
   lines.push(`Label:       ${notchLabel()}`);
   lines.push(`Login item:  ${existsSync(plistPath(home)) ? plistPath(home) : "not installed"}`);

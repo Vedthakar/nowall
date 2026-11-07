@@ -176,3 +176,24 @@ test/               # vitest, *.test.ts
 fixtures/           # synthetic only; fixtures/private/ is gitignored
 scripts/fake-agent.mjs  # simulates any agent's stream + limit error for e2e
 ```
+
+## Windows tray app
+
+`notch/windows/NowallTray.cs` is the Windows counterpart of the notch. Like the notch, it only reads `status/*.json`, `agents.json` and `config.json`, and only acts by running the CLI (`switch`, `cancel`, `agents --write`). It's a single C# 5 file using WinForms, with no dependencies.
+
+**Why not Tauri.** The roadmap expected Tauri. It was replaced because the release tarball is packed on one machine today and has no Windows build step:
+
+| | Tauri | In-box C#, compiled on install |
+|---|---|---|
+| Added to the npm tarball | A prebuilt Windows exe, several MB, on a 1.1 MB package | About 15 KB of compressed source |
+| Build | Rust toolchain, plus a new Windows release job before every pack | None for us; `csc.exe` ships with Windows 10 and 11 |
+| Runtime | WebView2, which older Windows 10 installs can lack, and its browser processes | .NET Framework 4, part of Windows |
+| Code signing | A downloaded unsigned exe | Nothing is downloaded as a program |
+| Interface | Web technology, easier to make match the notch | Plain WinForms, plainer to look at |
+| Linux | Could later share the code | Windows only |
+
+The costs of this choice are a plainer interface, C# 5 only, no code shared with a future Linux app, and that security software which blocks `csc.exe` stops the tray app from building. Failover isn't affected, and setup says what happened.
+
+**Lifecycle** (`src/notch-windows.ts`). `startNotch` compiles the source to `<home>\notch\NowallTray-<source hash>.exe`, so an upgrade never has to overwrite a running exe, and writes the node and CLI paths to `launch.txt` beside it. The exe's parent folder is the home it reads. It starts at login through one value under `HKCU\...\Run`, named with the same `notchLabel` as the launchd job, and a mutex and quit event named from a hash of the home keep each home to one instance. So a sandboxed `NOWALL_HOME` can't reach the user's real tray. Upgrades take effect the next time `nowall setup` or `nowall notch` runs. `stopNotch` removes the value and asks every built exe to quit. `uninstall --global` also deletes the folder, since the exe is generated and isn't user data.
+
+**Testing.** The exe has flags that exercise the real code without a person: `--dump` prints what the panel would show, `--screenshot` and `--desktop-shot` draw it, and `--click` presses a button in the live panel. `scripts/windows-tray-smoke.mjs` uses them in CI against status files from real hooks and a real takeover of a simulated agent.

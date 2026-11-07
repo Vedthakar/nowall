@@ -16,7 +16,8 @@ import { isOurs, unwrapStatusLine } from "./adapters/common.js";
 import { readJsonSafe, writeAtomic } from "./fsafe.js";
 import { CHECKPOINT_PREFIX } from "./git.js";
 import { MARK_START, REPO_HOOK_FILES, rcFiles, removeRepoHooks, stripBlock } from "./init.js";
-import { spawn, spawnSync } from "./proc.js";
+import { removeTrayFiles, trayDir, trayLoginItem } from "./notch-windows.js";
+import { isWindows, spawn, spawnSync } from "./proc.js";
 import { type Account, accountAgent } from "./schemas.js";
 import { notchLabel, notchRunning, stopNotch, tempHomeProblem } from "./setup.js";
 import { configDir, loadConfig, saveConfig } from "./state.js";
@@ -312,6 +313,20 @@ function bootout(label: string): void {
 }
 
 function cleanNotch(home: string, dataDir: string, act: Actor): void {
+  if (isWindows) {
+    const label = notchLabel();
+    if (!noLaunchd() && !tempHomeProblem() && (trayLoginItem(label) || notchRunning())) {
+      act.do(`quit the tray app for ${tilde(dataDir)} and remove it from startup`, () =>
+        stopNotch(home),
+      );
+    }
+    if (existsSync(trayDir(dataDir))) {
+      act.do(`delete the built tray app in ${tilde(trayDir(dataDir))}`, () =>
+        removeTrayFiles(dataDir),
+      );
+    }
+    return;
+  }
   const plists = ownNotchPlists(home, dataDir);
   for (const path of plists) {
     const label =
@@ -579,7 +594,18 @@ function report(home: string, dataDir: string, flags: Flags, npmWasInstalled: bo
   lines.push(
     `  ${mark(!plists.length)} LaunchAgent plist: ${plists.length ? plists.map(tilde).join(", ") : "none"}`,
   );
-  if (process.platform !== "darwin") {
+  if (isWindows && !noLaunchd() && !tempHomeProblem()) {
+    const item = trayLoginItem(label);
+    lines.push(
+      `  ${mark(!item)} tray app startup entry ${label}: ${item ? "still there" : "none"}`,
+    );
+    const running = notchRunning();
+    lines.push(
+      `  ${mark(!running)} tray app for ${tilde(dataDir)}: ${running ? "still running" : "gone"}`,
+    );
+    const left = existsSync(trayDir(dataDir));
+    lines.push(`  ${mark(!left)} built tray app: ${left ? tilde(trayDir(dataDir)) : "none"}`);
+  } else if (process.platform !== "darwin") {
     lines.push("  ok   launchd/notch: not macOS");
   } else if (noLaunchd() || tempHomeProblem()) {
     lines.push(
