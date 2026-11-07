@@ -21,6 +21,8 @@ Your task is done. The last part was built by Cursor because Claude Code hit its
 
 nowall runs entirely on your computer. It has no account, server or telemetry, and each agent keeps its own login.
 
+> **nowall is new. If something doesn't work, please [report it](https://github.com/Vedthakar/nowall/issues/new).** Even a one-line report helps.
+
 ## Requirements
 
 - **Node.js 20 or newer** and **git**
@@ -268,6 +270,7 @@ Add `--dry-run` to either command to see what would change. Your own hooks and s
 
 ## Known limitations
 
+- Cursor doesn't report usage in advance, so nowall only learns an account is out when a takeover hits the limit. Its limit detection hasn't been tested against a real Cursor limit yet. If it misses the wording, the takeover stops with an error instead of moving on, so please [report the message](#report-an-issue).
 - A Cursor API key isn't checked when you add it, so a wrong key can show as signed in. Check one with `nowall account verify <id>`. During a takeover, an account whose login fails is skipped.
 - An extra Cursor account runs with its own home folder, so a takeover on it doesn't load your `~/.cursor` rules or MCP servers. Your git identity stays the same.
 - Cursor doesn't expose usage locally, so its circle has no rings.
@@ -296,7 +299,17 @@ npm run stress
 
 Tests never use real agents: `scripts/fake-agent.mjs` reproduces their output formats, limit errors and expired logins. `npm run build:notch` builds the macOS app and needs the Xcode command line tools. CI also installs nowall with `install.ps1` on Windows and runs `npm run smoke:windows`, which runs the hooks under cmd.exe, PowerShell and Git Bash, and `npm run smoke:windows-tray`, which builds the tray app and presses its buttons against status files from nowall's real hooks and a takeover by a simulated agent.
 
-Bug reports and pull requests are welcome through [GitHub issues](https://github.com/Vedthakar/nowall/issues).
+## Report an issue
+
+Please [open an issue](https://github.com/Vedthakar/nowall/issues/new) for anything that breaks, confuses you or doesn't match this README. Reports about real limits are especially useful, including the exact message an agent showed when it ran out. Pull requests are welcome too.
+
+It helps to include:
+
+- What you did, and what happened instead
+- `nowall --version`, your OS, and which agents you use
+- The output of `nowall account verify`, and `nowall logs` if a takeover was involved
+
+Check these for anything private before you post them. Run from a repo, `nowall logs` can include file paths and what the agent said.
 
 ## License
 

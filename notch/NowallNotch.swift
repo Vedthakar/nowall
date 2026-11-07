@@ -1551,7 +1551,7 @@ struct SettingsView: View {
             AccountsSection(store: store)
         }
         .padding(16)
-        .frame(width: 440)
+        .frame(minWidth: 500, maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -2204,19 +2204,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func showSettings() {
         if settings == nil {
-            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 440, height: 420),
-                             styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 780),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             w.title = "nowall Settings"
             w.isReleasedWhenClosed = false
-            let host = NSHostingView(rootView: SettingsView(store: store))
-            host.sizingOptions = [.preferredContentSize] // window follows the list as accounts come and go
-            w.contentView = host
+            w.contentMinSize = NSSize(width: 500, height: 360)
+            // It scrolls instead of growing: however many accounts there are, it can't run off the screen.
+            w.contentView = NSHostingView(rootView: ScrollView { SettingsView(store: store) })
             w.center()
             settings = w
         }
+        fitOnScreen(settings)
         store.refreshAgents()
         NSApp.activate(ignoringOtherApps: true)
         settings?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Keeps a window inside the screen it's on, which may be smaller than the last one it was on.
+    private func fitOnScreen(_ window: NSWindow?) {
+        guard let window, let visible = (window.screen ?? NSScreen.main)?.visibleFrame else { return }
+        var frame = window.frame
+        frame.size.height = min(frame.height, visible.height)
+        frame.size.width = min(frame.width, visible.width)
+        frame.origin.y = max(min(frame.origin.y, visible.maxY - frame.height), visible.minY)
+        frame.origin.x = max(min(frame.origin.x, visible.maxX - frame.width), visible.minX)
+        window.setFrame(frame, display: false)
     }
 }
 

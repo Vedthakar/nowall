@@ -129,15 +129,26 @@ export function accountFromEnv(agent: AgentId, env: NodeJS.ProcessEnv): AccountI
   return agent;
 }
 
+/**
+ * The folder holding an account's login, asked for by name: a saved config can list these settings
+ * in any order, and the other values aren't folders at all.
+ */
+export function profileFolder(account: Account): string | undefined {
+  const env = account.env;
+  if (!env) return undefined;
+  const named = account.agent === "cursor" ? env.HOME : env[PROFILE_ENV[account.agent] ?? ""];
+  return named ?? Object.values(env)[0];
+}
+
 /** Where a profile keeps its login, for messages. */
 export function profilePath(account: Account): string | null {
-  const v = account.env ? Object.values(account.env)[0] : undefined;
+  const v = profileFolder(account);
   return v && existsSync(v) ? v : (v ?? null);
 }
 
 /** True when nowall created this profile directory (so it may also delete it). */
 export function profileIsManaged(account: Account): boolean {
-  const dir = account.env ? Object.values(account.env)[0] : undefined;
+  const dir = profileFolder(account);
   if (!dir) return false;
   const base = resolve(profilesDir()) + sep;
   return resolve(dir).startsWith(base);
@@ -149,7 +160,7 @@ export function profileIsManaged(account: Account): boolean {
  */
 export function accountProblem(account: Account): { problem: string; hint: string } | null {
   if (account.env) {
-    const dir = Object.values(account.env)[0];
+    const dir = profileFolder(account);
     if (dir && !existsSync(dir))
       return { problem: "profile missing", hint: `nowall account login ${account.id}` };
   }
@@ -449,8 +460,8 @@ export function removeAccount(id: AccountId, opts: { purge?: boolean } = {}): Ac
   if (!account) return null;
   if (account.secret) deleteSecret(id, account.secret.store);
   if (opts.purge && profileIsManaged(account)) {
-    const dir = Object.values(account.env ?? {})[0] as string;
-    rmSync(dir, { recursive: true, force: true });
+    const dir = profileFolder(account);
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
   const rest = (config.accounts ?? []).filter((a) => a.id !== id);
   if (rest.length) config.accounts = rest;
@@ -537,7 +548,7 @@ export function loginAccount(
     );
   }
   let recreated = false;
-  const dir = account.env ? Object.values(account.env)[0] : undefined;
+  const dir = profileFolder(account);
   if (dir && !existsSync(dir)) {
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });

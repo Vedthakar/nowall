@@ -10,6 +10,7 @@ import {
   askHidden,
   loginArgs,
   nextLabel,
+  profileFolder,
   profilePath,
   removeAccount,
   secretStoreName,
@@ -403,7 +404,7 @@ function printAccounts(): void {
     const info = snap?.accounts?.find((x) => x.id === a.id);
     const signed =
       info?.signedIn === false ? "not signed in" : info?.signedIn === true ? "signed in" : "";
-    const where = a.env ? Object.values(a.env)[0] : a.secret ? `API key (${a.secret.store})` : "";
+    const where = a.env ? profileFolder(a) : a.secret ? `API key (${a.secret.store})` : "";
     process.stdout.write(
       `  ${on ? `${i + 1}.` : " -"} ${a.id.padEnd(20)} ${accountName(a.id).padEnd(24)} ${[on ? "" : "off", signed, where].filter(Boolean).join("  ")}\n`,
     );
