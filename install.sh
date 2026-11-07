@@ -42,4 +42,4 @@ fi
 say "Setting up..."
 nowall setup --gui
 
-say "Done. To add extra accounts later: nowall account add <agent> <label>. To remove nowall: nowall uninstall --global"
+say "Done. To add extra accounts later: nowall account add <agent>. To remove nowall: nowall uninstall --global"

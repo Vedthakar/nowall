@@ -6,14 +6,26 @@ import { type AgentAdapter, versionOf } from "./types.js";
 
 /** Generic limit wording for agents whose exact error text has not been captured yet. */
 function genericLimit(text: string, now: Date) {
+  // Cursor's soft limit: the agent carries on, just slower.
+  if (/continue at reduced speeds/i.test(text)) return null;
   const hit = classifyLimit(text, now);
   if (hit) return hit;
+  // Cursor's limit messages come from its server; these are the wordings its app ships.
   if (
-    /usage limit|quota|out of (fast )?requests|upgrade (your plan|to pro)|limit reached/i.test(text)
+    /usage limit|out of usage|add usage to continue|quota|out of (fast )?requests|upgrade (your plan|to pro)|(usage|requests?|spend|plan|daily|weekly|monthly) limit reached|hit your rate limit|spend limit to keep going/i.test(
+      text,
+    )
   ) {
     return {
       kind: "quota" as const,
       window: "unknown" as const,
+      message: text.trim().slice(0, 300),
+    };
+  }
+  if (/rate limit(ed| exceeded)/i.test(text)) {
+    return {
+      kind: "transient" as const,
+      window: "per-minute" as const,
       message: text.trim().slice(0, 300),
     };
   }

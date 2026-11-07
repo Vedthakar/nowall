@@ -25,6 +25,7 @@ const WINDOW: Record<string, string> = {
   credits: "credits",
   daily: "daily quota",
   "per-minute": "rate limit",
+  failing: "repeated errors",
   unknown: "usage limit",
 };
 
