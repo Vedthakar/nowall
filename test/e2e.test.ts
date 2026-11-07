@@ -347,6 +347,61 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
     expect(state.agents.cursor?.cooldownUntil).toBeUndefined();
   });
 
+  it("moves on from an account that keeps failing in words it doesn't know", () => {
+    const w = world(
+      {
+        claude: [CLAUDE_LIMITED],
+        codex: [{ limit: "Something new went wrong" }, { limit: "Something new went wrong" }],
+        cursor: [{ text: "All done.", files: { "src/y.ts": "// y\n" }, tasks: done(["a"]) }],
+      },
+      { order: ["claude", "codex", "cursor"] },
+    );
+    const r = run(w);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("Codex keeps failing. Trying the next account.");
+    expect(r.stdout).toContain("Your task is done.");
+    expect(r.stdout).toMatch(/Codex: .*hit repeated errors/);
+    const state = JSON.parse(readFileSync(join(w.env.NOWALL_HOME as string, "state.json"), "utf8"));
+    // Short, because this may not be a limit at all.
+    const until = Date.parse(state.agents.codex.cooldownUntil);
+    expect(until - Date.now()).toBeLessThan(16 * 60_000);
+  });
+
+  it("stops with an error when no other account is free", () => {
+    const w = world(
+      {
+        claude: [CLAUDE_LIMITED],
+        codex: [{ limit: "Something new went wrong" }, { limit: "Something new went wrong" }],
+      },
+      { order: ["claude", "codex"] },
+    );
+    expect(run(w).stdout).toContain("Stopped: the agent kept failing.");
+  });
+
+  it("skips an account whose profile folder is gone", () => {
+    const w = world(
+      {
+        claude: [CLAUDE_LIMITED],
+        cursor: [{ text: "All done.", files: { "src/x.ts": "// x\n" }, tasks: done(["a"]) }],
+      },
+      {
+        order: ["claude", "cursor:gone", "cursor"],
+        accounts: [
+          {
+            id: "cursor:gone",
+            agent: "cursor",
+            label: "gone",
+            env: { HOME: "/nonexistent/nowall-profile", AGENT_CLI_CREDENTIAL_STORE: "file" },
+          },
+        ],
+      },
+    );
+    const r = run(w);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("built by Cursor because Claude Code hit");
+    expect(r.stdout).not.toContain("Cursor (gone)");
+  });
+
   it("stops when the agent stops making changes (no runaway loop)", () => {
     const w = world(
       {

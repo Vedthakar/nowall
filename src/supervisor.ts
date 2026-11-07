@@ -280,7 +280,8 @@ export async function runHeadlessTurn(
   process.off("SIGINT", onInt);
   result.interrupted = interrupted;
   if (!sawDone && result.exitCode !== 0) result.isError = true;
-  if (stderr.trim()) errorTexts.push(stderr);
+  // On a turn that worked, stderr is only warnings, and may well mention limits.
+  if (stderr.trim() && (result.isError || result.exitCode !== 0)) errorTexts.push(stderr);
 
   const now = deps.now();
   for (const t of errorTexts) {
@@ -521,7 +522,25 @@ export async function failover(
       }
       transientRetries = 0;
       errors = r.isError ? errors + 1 : 0;
-      if (errors >= 2) return finish(deps, session, "error");
+      if (errors >= 2) {
+        // A limit in words nowall doesn't know looks exactly like this, so while another account
+        // is free the work moves on. The short cooldown is for the errors that aren't limits.
+        const others = available(deps);
+        for (const id of dropped) others.delete(id);
+        if (!pickNext(deps.config, loadState(), others, [next], deps.now())) {
+          return finish(deps, session, "error");
+        }
+        deps.out(dim(`  ${accountName(next)} keeps failing. Trying the next account.\n`));
+        current = next;
+        currentLimit = {
+          kind: "quota",
+          window: "failing",
+          message: `${accountName(next)} kept failing`,
+          resetsAt: new Date(deps.now().getTime() + 15 * 60_000).toISOString(),
+        };
+        handedOff = true;
+        continue;
+      }
 
       const tasks = readTasks(deps.root);
       if (tasks) {

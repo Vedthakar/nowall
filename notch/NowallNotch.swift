@@ -279,8 +279,20 @@ struct HotKeyCombo: Equatable {
                 text += part.count == 1 ? part.uppercased() : part.capitalized
             }
         }
-        guard let key, mods != 0 else { return nil }
+        guard let key, mods != 0, isSafe(key: key, modifiers: mods) else { return nil }
         return HotKeyCombo(keyCode: UInt32(key), modifiers: mods, display: text)
+    }
+
+    /// A global hotkey takes its keys away from every app. So a letter, number or space needs ⌃ or
+    /// ⌥ with something else, or ⌃⌘/⌥⌘: ⌘N is New Window everywhere, ⇧N is a capital N, and
+    /// ⌘⇧N is taken in many apps. An F key is safe with any modifier.
+    private static func isSafe(key: Int, modifiers: UInt32) -> Bool {
+        let fKeys = [kVK_F1, kVK_F2, kVK_F3, kVK_F4, kVK_F5, kVK_F6, kVK_F7, kVK_F8, kVK_F9, kVK_F10, kVK_F11, kVK_F12]
+        if fKeys.contains(key) { return true }
+        let ctrl = modifiers & UInt32(controlKey) != 0
+        let alt = modifiers & UInt32(optionKey) != 0
+        let cmd = modifiers & UInt32(cmdKey) != 0
+        return (ctrl && (alt || cmd || modifiers & UInt32(shiftKey) != 0)) || (alt && cmd)
     }
 }
 
@@ -1722,7 +1734,7 @@ struct HotkeyRecorder: View {
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
             if e.keyCode == UInt16(kVK_Escape) { stop(); return nil }
             guard let combo = HotKeyCombo.from(keyCode: e.keyCode, flags: e.modifierFlags) else {
-                problem = "Use a letter, number or F key with at least one of ⌃ ⌥ ⇧ ⌘."
+                problem = "Try ⌃⌥⌘ and a letter, or a modifier with an F key. Others would take over typing or app shortcuts."
                 return nil
             }
             stop()
@@ -2294,6 +2306,13 @@ func selftest() -> Bool {
     check("slow", presses([(0, 0, 1), (0.9, 0, 1)]), ["single", "single"])
     check("moved", presses([(0, 0, 1), (0.2, 40, 1)]), ["single", "single"])
     check("cancel default parses", [HotKeyCombo.parse("ctrl+alt+cmd+x")?.keyCode.description ?? ""], [HotKeyCombo.cancelDefault.keyCode.description])
+    // Shortcuts that would fire during normal typing or take over a common app command.
+    for s in ["cmd+n", "shift+n", "ctrl+n", "alt+n", "n", "cmd+shift+n", "alt+shift+n"] {
+        if HotKeyCombo.parse(s) != nil { ok = false; fputs("selftest: \(s) should be refused\n", stderr) }
+    }
+    for s in ["ctrl+alt+cmd+n", "ctrl+alt+x", "alt+cmd+n", "ctrl+cmd+n", "ctrl+shift+n", "cmd+f9"] {
+        if HotKeyCombo.parse(s) == nil { ok = false; fputs("selftest: \(s) should be allowed\n", stderr) }
+    }
     check("third press starts over", presses([(0, 0, 1), (0.2, 0, 2), (0.4, 0, 3)]), ["single", "double", "single"])
     return ok
 }

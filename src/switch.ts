@@ -332,6 +332,11 @@ export async function runSwitch(argv: string[], now = new Date()): Promise<numbe
     err(`${blocked}.`);
     return 2;
   }
+  const holder = lockHolder(root);
+  if (holder !== null && isTakeoverProcess(holder, sid)) {
+    err("this session is already being taken over. Stop it with: nowall cancel");
+    return 2;
+  }
 
   const config = loadConfig();
   const state = loadState();

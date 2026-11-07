@@ -5,6 +5,7 @@ import {
   accountEnv,
   accountFromEnv,
   accountName,
+  accountProblem,
   addAccount,
   allAccounts,
   askHidden,
@@ -167,7 +168,7 @@ async function availableAccounts(): Promise<Pick<Deps, "binaries" | "accounts">>
       .filter((a) => config.enabled[a.agent] && config.order.includes(a.id))
       .map(async (a) => {
         const bin = resolveBinary(ADAPTERS[a.agent].binary, process.argv[1]);
-        if (!bin) return;
+        if (!bin || accountProblem(a)) return;
         const env = accountEnv(config, a.id);
         const d = await ADAPTERS[a.agent].detect(
           defaultRunner,
@@ -242,6 +243,8 @@ async function cmdRun(argv: string[]): Promise<number> {
     return exitCode;
   }
 
+  // Ctrl-C between handing off and the next agent starting must still end this cleanly.
+  process.on("SIGINT", requestCancel);
   Object.assign(deps, await availableAccounts());
   const hit = { kind: "quota" as const, window: limit.window, message: limit.message };
   const from = limit.account ?? accountFromEnv(agent, process.env);

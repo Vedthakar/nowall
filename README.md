@@ -38,14 +38,48 @@ nowall runs entirely on your computer. It has no account, server or telemetry, a
 curl -fsSL https://raw.githubusercontent.com/Vedthakar/nowall/main/install.sh | sh
 ```
 
-The installer downloads the prebuilt release and opens the setup window on a Mac. It finds your agents, adds its hooks, sets the takeover order and hotkey, and starts the notch. There is nothing to configure per project.
+On a Mac, this opens the **setup window**, and that's all you need. It walks you through:
 
-Setup also asks you to do two things in a terminal, because nowall can't do them for you:
+1. **Agents:** finds what you have, with buttons to sign in or install the rest.
+2. **Priority:** drag your accounts into takeover order, and add a second account if you have one.
+3. **Hotkeys:** one to switch agents, one to cancel a switch.
 
-1. **Sign in to terminal Claude** with `claude auth login`. The desktop app has its own login, and Claude can't take over a task without this one.
-2. **Run `claude` and send one message.** Claude only reports usage there, so its usage rings stay plain until you do.
+Then the notch appears on the right edge of your screen. There is nothing to configure per project.
 
-To review each step yourself, run the same install by hand:
+In the Agents step, finish these two if you use Claude Code. They need you, in a terminal, and the setup window opens both for you:
+
+- **Sign in to terminal Claude.** The desktop app has its own login, and Claude can't take over a task without this one.
+- **Send one message in terminal Claude.** Claude only reports usage there, so its usage rings stay plain until you do.
+
+nowall never signs in for you and never handles your agent logins. To change anything later, right-click the notch and open **Settings**.
+
+### Set it up with an agent
+
+Prefer to have a coding agent do it? Paste this prompt into Claude Code, Cursor or similar:
+
+```text
+Install nowall on this computer and help me finish setting it up.
+
+1. Mac or Linux: run this. On a Mac it opens a setup window and waits until I finish it, so tell me the window is open and don't stop the command or treat it as stuck. Allow at least 15 minutes.
+   curl -fsSL https://raw.githubusercontent.com/Vedthakar/nowall/main/install.sh | sh
+   Windows: run this in PowerShell.
+   irm https://raw.githubusercontent.com/Vedthakar/nowall/main/install.ps1 | iex
+2. If no window can open (Linux, or over SSH), the installer sets up in the terminal instead. If it stops to ask something, run: nowall setup --yes
+3. Run these and read the output: nowall agents, then nowall account verify
+4. Tell me in plain words which coding agents are ready, and give me the exact command for any I still need to sign in to. I'll run sign-ins myself.
+
+Never ask for, read or print my logins, tokens or API keys.
+```
+
+### Other ways to install
+
+On Windows, run this in PowerShell. There's no setup window there yet, so setup runs in the terminal:
+
+```powershell
+irm https://raw.githubusercontent.com/Vedthakar/nowall/main/install.ps1 | iex
+```
+
+To review each step yourself, install by hand:
 
 ```bash
 npm install -g https://github.com/Vedthakar/nowall/releases/latest/download/nowall.tgz
@@ -55,19 +89,7 @@ npm install -g https://github.com/Vedthakar/nowall/releases/latest/download/nowa
 nowall setup
 ```
 
-Run on its own, `nowall setup` also offers to add extra accounts.
-
-If setup reports an agent that isn't signed in, run the login command it prints. nowall never signs in for you and never handles your agent logins.
-
-On Windows, run this in PowerShell instead:
-
-```powershell
-irm https://raw.githubusercontent.com/Vedthakar/nowall/main/install.ps1 | iex
-```
-
-To let Claude Code do the install, paste this prompt:
-
-> Install nowall on this computer: run `curl -fsSL https://raw.githubusercontent.com/Vedthakar/nowall/main/install.sh | sh`. Then run `nowall agents` and tell me which coding agents it found, and the exact command for any agent I still need to sign in to.
+On a Mac, `nowall setup` opens the same window. Add `--cli` to stay in the terminal.
 
 ### Try it first
 
@@ -236,6 +258,7 @@ Settings live in `~/.config/nowall/config.json` (on Windows, `%USERPROFILE%\.con
 | `order` | Accounts in takeover order. Any account left out is off |
 | `takeover` | `background` (silent, the default), `terminal` (opens a Terminal window) or `off` |
 | `yolo` | Give agents that take over full access. Off by default |
+| `hotkey`, `cancelHotkey` | Shortcuts for switch and cancel, such as `ctrl+alt+cmd+n`, or `false` for off. Plain shortcuts like `cmd+n` are ignored, because they'd take over normal typing and app commands |
 | `stop` | Limits on how long an unattended takeover can run |
 
 ## Privacy and security
@@ -272,7 +295,7 @@ Add `--dry-run` to either command to see what would change. Your own hooks and s
 
 ## Known limitations
 
-- Cursor doesn't report usage in advance, so nowall only learns an account is out when a takeover hits the limit. Its limit detection hasn't been tested against a real Cursor limit yet. If it misses the wording, the takeover stops with an error instead of moving on, so please [report the message](#report-an-issue).
+- Cursor doesn't report usage in advance, so nowall only learns an account is out when a takeover hits the limit. Detection uses the wording in Cursor's own app, but hasn't met a real limit on the CLI yet. If the wording differs, nowall moves on to the next account after two failed tries, so please [report the message](#report-an-issue).
 - A Cursor API key isn't checked when you add it, so a wrong key can show as signed in. Check one with `nowall account verify <id>`. During a takeover, an account whose login fails is skipped.
 - An extra Cursor account runs with its own home folder, so a takeover on it doesn't load your `~/.cursor` rules or MCP servers. Your git identity stays the same.
 - Cursor doesn't expose usage locally, so its circle has no rings.
