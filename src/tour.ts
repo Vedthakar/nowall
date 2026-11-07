@@ -99,6 +99,9 @@ export function tourText(opts: TourOptions = {}): string {
     `  ${p("warn", "One limit:")} the desktop app never reports usage, so its rings stay empty until any terminal`,
     "  `claude` turn fills them in (Claude only shares usage through its status line).",
     "",
+    h("Found a problem?"),
+    `  You're welcome to report it: ${p("link", `${REPO}/issues`)}`,
+    "",
     h("Pictures"),
     `  ${p("link", TOUR_LINKS.notch)}`,
     ...TOUR_LINKS.images.map((u) => `  ${p("link", u)}`),
@@ -120,6 +123,7 @@ export function shortTour(opts: TourOptions = {}): string {
     `Add a second account any time: ${p("claude", "nowall account add claude work")}`,
     "Desktop app and terminal Claude Code are both covered. Usage rings fill in after any terminal `claude` turn.",
     `Run \`${p("bold", "nowall tour")}\` any time for the full walkthrough and screenshots.`,
+    `Found a problem? You're welcome to report it: ${p("link", `${REPO}/issues`)}`,
   ];
   return `${lines.join("\n")}\n`;
 }

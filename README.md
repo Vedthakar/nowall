@@ -21,7 +21,7 @@ Your task is done. The last part was built by Cursor because Claude Code hit its
 
 nowall runs entirely on your computer. It has no account, server or telemetry, and each agent keeps its own login.
 
-> **nowall is new. If something doesn't work, please [report it](https://github.com/Vedthakar/nowall/issues/new).** Even a one-line report helps.
+> **nowall is new, and you're welcome to bring up anything you find.** If something breaks or confuses you, please [open an issue](https://github.com/Vedthakar/nowall/issues/new). Even a one-line report helps.
 
 ## Requirements
 
@@ -326,7 +326,7 @@ Tests never use real agents: `scripts/fake-agent.mjs` reproduces their output fo
 
 ## Report an issue
 
-Please [open an issue](https://github.com/Vedthakar/nowall/issues/new) for anything that breaks, confuses you or doesn't match this README. Reports about real limits are especially useful, including the exact message an agent showed when it ran out. Pull requests are welcome too.
+You're welcome to [open an issue](https://github.com/Vedthakar/nowall/issues/new) for anything that breaks, confuses you or doesn't match this README. Reports about real limits are especially useful, including the exact message an agent showed when it ran out. Pull requests are welcome too.
 
 It helps to include:
 
