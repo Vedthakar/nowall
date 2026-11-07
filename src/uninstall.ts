@@ -11,7 +11,7 @@ import {
 import { homedir } from "node:os";
 import { basename, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { deleteSecret } from "./accounts.js";
+import { deleteSecret, profileFolder } from "./accounts.js";
 import { isOurs, unwrapStatusLine } from "./adapters/common.js";
 import { readJsonSafe, writeAtomic } from "./fsafe.js";
 import { CHECKPOINT_PREFIX } from "./git.js";
@@ -465,10 +465,9 @@ function inventory(dataDir: string): Inventory {
   const config = loadConfig();
   for (const a of config.accounts ?? []) {
     if (a.secret?.store === "keychain") inv.keychainAccounts.push(a);
-    for (const dir of Object.values(a.env ?? {})) {
-      if (!dir.startsWith(`${dataDir}${sep}`) && !inv.foreignProfiles.includes(dir)) {
-        inv.foreignProfiles.push(dir);
-      }
+    const dir = profileFolder(a);
+    if (dir && !dir.startsWith(`${dataDir}${sep}`) && !inv.foreignProfiles.includes(dir)) {
+      inv.foreignProfiles.push(dir);
     }
   }
   return inv;

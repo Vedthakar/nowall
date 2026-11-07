@@ -10,6 +10,7 @@ import {
   askHidden,
   findAccount,
   loginAccount,
+  profileFolder,
 } from "./accounts.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { type Runner, defaultRunner } from "./adapters/types.js";
@@ -455,7 +456,7 @@ export async function runAccountLogin(argv: string[]): Promise<number> {
       }
     } else if (account.env) {
       process.stdout.write(
-        `Sign in to ${accountName(id)} now (kept apart from your other logins, in ${Object.values(account.env)[0]}):\n\n`,
+        `Sign in to ${accountName(id)} now (kept apart from your other logins, in ${profileFolder(account)}):\n\n`,
       );
     }
     const r = loginAccount(id, apiKey === undefined ? {} : { apiKey });

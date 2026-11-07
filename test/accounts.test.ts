@@ -211,6 +211,30 @@ esac
     expect(existsSync(join(w.cfg, "profiles"))).toBe(false);
   });
 
+  it("stays signed in when its settings are saved in another order, as the notch saves them", () => {
+    const w = world(`echo "second@example.com" > "$HOME/.who"`);
+    expect(add(w.env, "team").status).toBe(0);
+    const path = join(w.cfg, "config.json");
+    const c = JSON.parse(readFileSync(path, "utf8"));
+    const entry = c.accounts[0];
+    entry.env = Object.fromEntries(
+      Object.entries(entry.env).sort(([a], [b]) => a.localeCompare(b)),
+    );
+    expect(Object.keys(entry.env)[0]).toBe("AGENT_CLI_CREDENTIAL_STORE");
+    writeFileSync(path, JSON.stringify(c));
+
+    const cli = (...args: string[]) =>
+      spawnSync(process.execPath, [CLI, "account", ...args], { env: w.env, encoding: "utf8" });
+    const verify = cli("verify", "cursor:team");
+    expect(verify.stdout).not.toContain("profile missing");
+    expect(verify.stdout).toContain("signed in");
+    expect(verify.stdout).not.toContain("not signed in");
+    expect(cli("list").stdout).toContain(join(w.cfg, "profiles", "cursor-team"));
+
+    expect(cli("remove", "cursor:team", "--purge").status).toBe(0);
+    expect(existsSync(join(w.cfg, "profiles", "cursor-team"))).toBe(false);
+  });
+
   it("the same account is refused, and leaves nothing behind", () => {
     const w = world(`echo "main@example.com" > "$HOME/.who"`);
     const r = add(w.env, "dup");
