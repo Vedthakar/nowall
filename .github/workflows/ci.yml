@@ -39,4 +39,13 @@ jobs:
           $env:NOWALL_SOURCE = (Resolve-Path $tgz).Path
           ./install.ps1
           "$(npm prefix -g)" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      # Before smoke:windows, which uninstalls nowall. Then the tray `install.ps1` started must be running.
+      - run: npm run smoke:windows-tray -- tray-shots
+      - name: Keep the tray app's pictures of itself
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tray-screenshots
+          path: tray-shots
+          if-no-files-found: warn
       - run: npm run smoke:windows

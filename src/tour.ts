@@ -1,3 +1,5 @@
+import { isWindows } from "./proc.js";
+
 /**
  * `nowall tour`: a short walkthrough of what nowall does, how to read the notch, and the few
  * commands worth knowing. `setup` ends with the condensed version (`shortTour`).
@@ -60,8 +62,8 @@ export function tourText(opts: TourOptions = {}): string {
   const h = (s: string) => p("bold", s);
   const lines = [
     h("What nowall does"),
-    `  You keep working in ${p("claude", "Claude Code")}, ${p("cursor", "Cursor")} or ${p("codex", "Codex")} as usual. A small black notch on the right`,
-    "  edge of your screen shows what each chat is doing. When an agent hits its usage limit mid-task,",
+    `  You keep working in ${p("claude", "Claude Code")}, ${p("cursor", "Cursor")} or ${p("codex", "Codex")} as usual. ${isWindows ? "A tray icon by the clock" : "A small black notch on the right"}`,
+    `  ${isWindows ? "" : "edge of your screen "}shows what each chat is doing. When an agent hits its usage limit mid-task,`,
     "  nowall checkpoints your files and quietly continues in the next account you are signed in to,",
     "  with the same context. You get one summary when it is done. Everything stays on this computer.",
     "",
@@ -70,11 +72,20 @@ export function tourText(opts: TourOptions = {}): string {
     `  ${p("dim", "nowall logs -f")}    watch a background takeover      ${p("dim", "nowall undo [n]")}   roll files back to a step`,
     `  ${p("dim", "nowall status")}     accounts, cooldowns, last session ${p("dim", "nowall demo")}      a simulated failover`,
     "",
-    h("The notch"),
-    ...legend(p),
-    "  Click a bubble to open that chat. Hover a bubble to see which chat it is.",
-    "  Double-click the notch, circles included, for details: repo, activity, who built what, usage.",
-    "  Right-click for Settings (takeover order), refresh, hide for an hour, or quit.",
+    ...(isWindows
+      ? [
+          h("The tray app"),
+          "  The dot on the icon: green working, orange needs you or switching, blue finished, gray quiet.",
+          "  Click the icon for details: repo, activity, who built what, usage, Switch and Cancel switch.",
+          "  Right-click for the same actions on the latest session, refresh, or quit.",
+        ]
+      : [
+          h("The notch"),
+          ...legend(p),
+          "  Click a bubble to open that chat. Hover a bubble to see which chat it is.",
+          "  Double-click the notch, circles included, for details: repo, activity, who built what, usage.",
+          "  Right-click for Settings (takeover order), refresh, hide for an hour, or quit.",
+        ]),
     "",
     h("Accounts"),
     "  More than one subscription? Each extra account is its own login, kept apart from your main one:",
@@ -99,8 +110,12 @@ export function tourText(opts: TourOptions = {}): string {
 export function shortTour(opts: TourOptions = {}): string {
   const p = painter(opts.color ?? false);
   const lines = [
-    p("bold", "The notch, in one glance:"),
-    ...legend(p),
+    ...(isWindows
+      ? [
+          p("bold", "The tray icon, in one glance:"),
+          "  Green working, orange needs you or switching, blue finished, gray quiet. Click it for details.",
+        ]
+      : [p("bold", "The notch, in one glance:"), ...legend(p)]),
     "",
     `Add a second account any time: ${p("claude", "nowall account add claude work")}`,
     "Desktop app and terminal Claude Code are both covered. Usage rings fill in after any terminal `claude` turn.",

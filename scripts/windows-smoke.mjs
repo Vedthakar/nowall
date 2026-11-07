@@ -3,7 +3,7 @@
 // on another OS: hooks really run under cmd.exe, PowerShell and Git Bash, the `.cmd` shim works,
 // nothing is left over after a failover, and uninstall cleans up.
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -59,6 +59,15 @@ check("status-line tap has no shell quoting", status !== "" && !/['"]/.test(stat
 const tap = run("cmd.exe", ["/d", "/s", "/c", status], '{"rate_limits":{}}');
 check("status-line tap runs", tap.code === 0, tap.out);
 
+// The tray app `nowall setup` started, in the real config folder.
+const trayDir = join(homedir(), ".config", "nowall", "notch");
+const trayExe = () =>
+  existsSync(trayDir) ? readdirSync(trayDir).find((n) => n.endsWith(".exe")) : undefined;
+const trayStatus = nowall("notch", "status");
+check("setup built the tray app", Boolean(trayExe()), trayStatus.stdout);
+check("setup started the tray app", /Running:\s+yes/.test(trayStatus.stdout), trayStatus.stdout);
+check("it starts at login", /Login item:\s+HKCU/.test(trayStatus.stdout), trayStatus.stdout);
+
 const demo = nowall("demo");
 const output = `${demo.stdout}${demo.stderr}`;
 check(
@@ -74,6 +83,12 @@ const off = nowall("uninstall", "--global", "--yes");
 check("uninstall runs", off.status === 0, `${off.stdout}${off.stderr}`);
 const after = existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : "";
 check("uninstall removed the hooks", !after.includes("NOWALL_HOOK"), after);
+check("uninstall removed the tray app", !trayExe(), `${off.stdout}${off.stderr}`);
+const startup = run("reg.exe", [
+  "query",
+  "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+]);
+check("uninstall removed it from startup", !/dev\.nowall\.notch/.test(startup.out), startup.out);
 
 if (failures.length) {
   console.error(`\n${failures.length} check(s) failed: ${failures.join(", ")}`);

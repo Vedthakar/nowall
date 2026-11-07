@@ -21,6 +21,7 @@
     "dist",
     "scripts/fake-agent.mjs",
     "notch/build/NowallNotch.app",
+    "notch/windows/NowallTray.cs",
     "install.sh",
     "install.ps1"
   ],
@@ -34,8 +35,9 @@
     "test": "vitest run",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "test:windows": "vitest run test/windows.test.ts test/adapters.test.ts test/limits.test.ts test/packet.test.ts test/redact.test.ts test/state.test.ts test/git-session.test.ts",
+    "test:windows": "vitest run test/windows.test.ts test/notch-windows.test.ts test/adapters.test.ts test/limits.test.ts test/packet.test.ts test/redact.test.ts test/state.test.ts test/git-session.test.ts",
     "smoke:windows": "node scripts/windows-smoke.mjs",
+    "smoke:windows-tray": "node scripts/windows-tray-smoke.mjs",
     "stress": "npm run build && node scripts/stress.mjs",
     "prepublishOnly": "npm run lint && npm run typecheck && npm test",
     "build:notch": "sh scripts/build-notch.sh",
