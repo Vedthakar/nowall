@@ -1,6 +1,6 @@
-# Security review (v0.1)
+# Security review
 
-Date: 2026-10-15. Scope: everything nowall reads, writes, runs or prints. Each finding has a regression test.
+Reviewed for v0.1 on 2026-10-15, and again for v0.3.1 on 2026-11-07 ([findings below](#review-for-v031)). Scope: everything nowall reads, writes, runs or prints. Each finding has a regression test.
 
 ## Threat model
 
@@ -23,6 +23,22 @@ nowall runs with the user's privileges, inside repositories the user may not ful
 | 11 | Low | **Concurrent sessions** in one repo could clobber each other's session state. | Per-repo lock with PID liveness check; a second session runs without failover and says so. | "a second concurrent session…" |
 | 12 | Low | **Stale task list** from an earlier session could end a new session immediately. | The previous `tasks.json` is archived at every session start. | "a stale tasks.json…" |
 | 13 | Info | **Fake "signed in".** Cursor's `status --format json` reports `isAuthenticated: true` with an expired login. | Stricter detection, plus failover skips any agent that returns an auth error and tells the user the login command. | "skips an agent that isn't signed in" |
+
+## Review for v0.3.1
+
+Date: 2026-11-07. The review ran 50 attack checks against the CLI and notch, and 63 user journey and edge case checks from a packed install on a clean home, using stand-in agents.
+
+| # | Severity | Finding | Fix |
+|---|---|---|---|
+| 14 | Medium | **Hotkeys could take over normal typing.** The recorder accepted `cmd+n` and `shift+n`, so New Window or a capital N could hand off a session, and with `yolo` on the agent could then run commands. | Letters and numbers need a safe pair of modifiers, and a saved unsafe shortcut falls back to the default. |
+| 15 | Medium | **An unattended takeover could act beyond the computer.** One planned to merge and publish because the user's request asked for it. It was stopped before doing so. | The handoff prompt says pushing, merging, deploying and publishing wait for the user. This is an instruction to the agent, not enforcement: with `yolo` on it can still run them. |
+| 16 | Low | **Path traversal in `nowall open --sid`.** It could read a JSON file outside the status folder and open Terminal at a path inside it. Needs local command access. | A session id can only name a file in the status folder. |
+| 17 | Low | **A wrong folder could be read as a login.** Account folders were found by position, and the notch saves settings in sorted order, so a real login showed as signed out and `--purge` missed it. | `profileFolder()` asks for the folder by name, everywhere. |
+| 18 | Low | **Pasted API keys could show on screen.** The setup wizard muted input through a Node private that no longer exists, and silently stopped muting. | Hidden prompts now send readline's output nowhere, with no private APIs. |
+
+Attacks that found nothing: shell injection through repo names and status files; hostile `.handoff` symlinks; deleting folders outside `profiles`; secrets reaching the journal, prompts, logs or checkpoints; malformed, huge or looping status and config files; `/dev/zero` and FIFOs as transcript paths; and git hooks running on checkpoints. (Only `reference-transaction` runs, as it does for any ref update, and a clone can't carry hooks.)
+
+Since v0.3, an extra Cursor account's login sits in `auth.json` in that account's folder under `profiles`, written by Cursor's CLI with its own permissions rather than kept in the Keychain. nowall doesn't read it. The folder is `0700`, and `nowall account remove <id> --purge` deletes it.
 
 ## Properties that hold
 

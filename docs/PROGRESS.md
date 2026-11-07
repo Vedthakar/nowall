@@ -43,11 +43,14 @@ Last updated 2026-11-05.
 - [x] Real Claude Code 2.1.295 accepts nowall's hook config; SessionStart and prompt hooks fire and journal correctly
 - [x] Real Claude's auth-failure output captured and handled
 - [x] Real Cursor CLI (2026.07.09): expired-login state detected correctly
+- [x] **Real takeovers on a second Cursor account, 2026-11-07.** In throwaway repos with a simulated Claude limit: a second account signed in on the website finished the task, an out-of-usage account (simulated by a stand-in) fell through to the main one, the next task skipped the cooling account, a manual switch and a cancel both worked, and the main login stayed signed in.
 - [x] **Full real failover (Claude → Cursor), 2026-10-20.** Claude hit its monthly spend limit mid-task in a real project; nowall took over silently in the background and Cursor finished it (14 files, +320/−36), with checkpoints and a summary.
 
 ## Not yet verified
-- Cursor's exact usage-limit message (generic detection is in place)
+- A real usage limit on the Cursor CLI. Detection is tested against the wording in Cursor's own app, and an account that fails twice hands off to the next one
 - Antigravity's headless output (not installed here; chain verified with a fake agent only)
 - Codex `exec resume` flag order (not installed here)
 - A real second Claude account through `CLAUDE_CONFIG_DIR` (the mechanism is Anthropic-documented; verified with fake agents)
-- A real second Cursor account through `CURSOR_API_KEY` (the Cursor CLI here is not signed in)
+- A second Cursor account through `--api-key` with a real key (tested with a fake one; website sign-in is the main path and is verified)
+- Windows with real agents, and the tray app on a real PC
+- Linux
