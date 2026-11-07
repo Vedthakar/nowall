@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { lastLimitFromTranscript } from "../src/adapters/claude.js";
 import { parseCodexLine } from "../src/adapters/codex.js";
-import { parseStreamJson } from "../src/adapters/common.js";
+import { hookCommand, parseStreamJson } from "../src/adapters/common.js";
 import { ADAPTERS } from "../src/adapters/index.js";
 import type { Runner } from "../src/adapters/types.js";
 
@@ -219,7 +219,7 @@ describe("installHooks", () => {
         hooks: [
           {
             type: "command",
-            command: "NOWALL_HOOK=1 nowall hook stop-failure --agent claude",
+            command: hookCommand("nowall", "hook stop-failure --agent claude"),
             timeout: 30,
           },
         ],
