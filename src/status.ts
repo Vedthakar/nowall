@@ -76,8 +76,9 @@ export function statusDir(): string {
   return join(configDir(), "status");
 }
 
+/** A session id only ever names a file in the status folder, whatever it contains. */
 function statusFile(sid: string): string {
-  return join(statusDir(), `${sid}.json`);
+  return join(statusDir(), `${sid.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
 }
 
 export function readStatus(sid: string): SessionStatus | null {

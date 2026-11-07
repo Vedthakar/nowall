@@ -49,6 +49,7 @@ export type LimitWindow =
   | "credits"
   | "daily"
   | "per-minute"
+  | "failing"
   | "unknown";
 
 export interface LimitHit {

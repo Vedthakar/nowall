@@ -231,3 +231,47 @@ describe("installHooks", () => {
     expect(nowallGroups).toHaveLength(1);
   });
 });
+
+describe("Cursor's real limit wording, as shipped in its app", () => {
+  const now = new Date("2026-11-07T12:00:00Z");
+  const kind = (text: string) => ADAPTERS.cursor.detectLimit(text, now)?.kind;
+
+  it.each([
+    "You've hit your usage limits",
+    "You've hit your rate limit on your current plan",
+    "You’ve hit your usage limit",
+    "You've reached your usage limit.",
+    "You are out of usage. Switch to Auto or add usage to continue.",
+    "Weekly usage limit reached. It resets in 4 days.",
+    "Total usage limit reached",
+    "Monthly usage limit",
+    "Set a spend limit to keep going.",
+  ])("a limit: %s", (text) => {
+    expect(kind(text)).toBe("quota");
+  });
+
+  it("reads the reset time when it gives one", () => {
+    const hit = ADAPTERS.cursor.detectLimit(
+      "Weekly usage limit reached. It resets in 4 days.",
+      now,
+    );
+    expect(hit?.resetsAt?.slice(0, 10)).toBe("2026-11-11");
+  });
+
+  it.each(["rate limit exceeded", "Rate limited by model provider, retrying…"])(
+    "worth retrying: %s",
+    (text) => {
+      expect(kind(text)).toBe("transient");
+    },
+  );
+
+  it.each([
+    "Usage limit reached, but you can continue at reduced speeds.",
+    "Conversation search provider limit reached",
+    "Switched to Cursor Models. Other Models limit reached.",
+    "The provided API key is invalid.",
+    "Connection failed: ECONNRESET",
+  ])("not a limit: %s", (text) => {
+    expect(kind(text)).toBeUndefined();
+  });
+});

@@ -381,6 +381,13 @@ describe("the notch app", () => {
     },
   );
 
+  it("a session id can't reach a file outside the status folder", () => {
+    const outside = join(process.env.NOWALL_HOME as string, "secret.json");
+    writeFileSync(outside, JSON.stringify({ v: 1, sid: "x", repo: "/x", repoName: "LEAKED" }));
+    expect(readStatus("../secret")).toBeNull();
+    expect(readStatus("..\\secret")).toBeNull();
+  });
+
   it("asking how a command works never runs it", () => {
     const home = mkdtempSync(join(tmpdir(), "nowall-help-"));
     const env = { ...process.env, NOWALL_HOME: home };

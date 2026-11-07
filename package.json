@@ -1,6 +1,6 @@
 {
   "name": "nowall",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "When your coding agent hits its usage limit, the work keeps going in the next one.",
   "keywords": ["claude-code", "cursor", "codex", "ai-agents", "failover", "rate-limit", "cli"],
   "homepage": "https://github.com/Vedthakar/nowall#readme",
