@@ -246,6 +246,8 @@ async function cmdRun(argv: string[]): Promise<number> {
   Object.assign(deps, await availableAccounts());
   const hit = { kind: "quota" as const, window: limit.window, message: limit.message };
   const from = limit.account ?? accountFromEnv(agent, process.env);
+  // Ctrl-C between handing off and the next agent starting must still end this cleanly.
+  process.on("SIGINT", requestCancel);
   await failover(deps, session, from, limit.resetsAt ? { ...hit, resetsAt: limit.resetsAt } : hit);
   process.stdout.write(`\n${writeSummary(root, loadSession(root) ?? session)}\n`);
   return 0;
