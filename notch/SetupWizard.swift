@@ -488,6 +488,12 @@ struct ReadyStep: View {
                 Label("Right-click for Settings", systemImage: "contextualmenu.and.cursorarrow")
             }
             .font(.system(size: 12)).foregroundColor(.white.opacity(0.8)).padding(.top, 14)
+            HStack(spacing: 4) {
+                Text("nowall is new, and you're welcome to bring up anything you find:")
+                    .foregroundColor(.white.opacity(0.6))
+                Link("open an issue", destination: URL(string: "https://github.com/Vedthakar/nowall/issues/new")!)
+            }
+            .font(.system(size: 11.5)).padding(.top, 12)
             Spacer()
             HStack(spacing: 10) {
                 Button("Watch a demo") { runInTerminal("nowall demo", store: store) }.controlSize(.large)
