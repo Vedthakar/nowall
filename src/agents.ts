@@ -29,6 +29,8 @@ export interface AgentInfo {
   installed: boolean;
   /** Installed only as a desktop app (no terminal command), e.g. Claude desktop. */
   desktopOnly?: boolean;
+  /** The Claude desktop app is here too. It has its own login, separate from the terminal CLI's. */
+  desktopApp?: boolean;
   signedIn: boolean | "unknown";
   /** When `signedIn` was last asked of the agent (cached for 10 minutes per entry). */
   checkedAt?: string;
@@ -74,7 +76,11 @@ export function agentsPath(): string {
 
 const SIGNIN_TTL_MS = 10 * 60_000;
 
-function claudeDesktopInstalled(): boolean {
+export function claudeDesktopInstalled(): boolean {
+  if (process.platform === "win32") {
+    const local = process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+    return existsSync(join(local, "AnthropicClaude"));
+  }
   return (
     existsSync("/Applications/Claude.app") ||
     existsSync(join(homedir(), "Applications", "Claude.app"))
@@ -179,6 +185,12 @@ export interface RefreshOptions {
  * Sign-in checks can hit the network (Cursor), so each account's answer is reused for 10 minutes
  * (`checkedAt`); `account add|remove|login` mark an entry stale and `verify` forces the check.
  */
+/** Usage windows that haven't reset yet. A window past its reset says nothing about today. */
+function current<T extends { resetsAt?: string }>(usage: T[] | undefined, now: Date) {
+  const live = usage?.filter((w) => !w.resetsAt || Date.parse(w.resetsAt) > now.getTime());
+  return live?.length ? live : undefined;
+}
+
 export async function refreshAgents(
   run: Runner = defaultRunner,
   now = new Date(),
@@ -229,12 +241,16 @@ export async function refreshAgents(
         info.desktopOnly = true;
         info.signedIn = "unknown";
       }
+      if (id === "claude" && claudeDesktopInstalled()) info.desktopApp = true;
       const s = state.agents[id];
       if (s?.cooldownUntil && Date.parse(s.cooldownUntil) > now.getTime()) {
         info.cooldownUntil = s.cooldownUntil;
         if (s.lastLimit?.message) info.limitMessage = s.lastLimit.message;
       }
-      const usage = id === "codex" ? codexUsage() : id === "claude" ? claudeUsage(now) : undefined;
+      const usage = current(
+        id === "codex" ? codexUsage() : id === "claude" ? claudeUsage(now) : undefined,
+        now,
+      );
       if (usage) info.usage = usage;
       return info;
     }),
@@ -274,12 +290,14 @@ export async function refreshAgents(
         info.cooldownUntil = s.cooldownUntil;
         if (s.lastLimit?.message) info.limitMessage = s.lastLimit.message;
       }
-      const usage =
+      const usage = current(
         a.agent === "codex"
           ? codexUsage(homedir(), env.CODEX_HOME)
           : a.agent === "claude"
             ? claudeUsage(now, a.id)
-            : undefined;
+            : undefined,
+        now,
+      );
       if (usage) info.usage = usage;
       return info;
     }),

@@ -1,13 +1,13 @@
 # nowall
 
-Automatic failover for AI coding agents, with a live status notch for macOS.
+Automatic failover for AI coding agents on macOS and Windows, with a live status notch on macOS.
 
 When Claude Code hits its usage limit mid-task, nowall saves your work and continues the task in the next coding agent you're signed in to, with the full context. A small notch on the edge of your screen shows what each agent is doing.
 
 <p align="center">
   <img src="docs/images/notch-tab.png" alt="The collapsed nowall notch on the right edge of the screen" height="340">
   &nbsp;&nbsp;
-  <img src="docs/images/notch-card.png" alt="The nowall notch expanded on hover, showing the active session and each account" height="340">
+  <img src="docs/images/notch-card.png" alt="The nowall notch opened with a double-click, showing the active session and each account" height="340">
 </p>
 
 When the task finishes, you get one summary:
@@ -26,8 +26,8 @@ nowall runs entirely on your computer. It has no account, server or telemetry, a
 - **Node.js 20 or newer** and **git**
 - **macOS 13 or newer** for the notch (Apple Silicon or Intel)
 - **Linux:** the CLI and failover are built to work but haven't been tested there yet, and there is no notch
-- **Windows:** not supported yet
-- **A git repository:** nowall works inside git repos and ignores other folders
+- **Windows 10 or 11:** the CLI and failover, with Git for Windows. There is no notch yet. See [Windows](#windows)
+- **A git repository for failover:** chats in other folders still show in the notch, but can't be taken over
 - **At least two agents** for failover, for example Claude Code and the Cursor CLI
 
 ## Install
@@ -36,7 +36,12 @@ nowall runs entirely on your computer. It has no account, server or telemetry, a
 curl -fsSL https://raw.githubusercontent.com/Vedthakar/nowall/main/install.sh | sh
 ```
 
-The installer downloads the prebuilt release, finds your agents, adds its hooks, and starts the notch. There is nothing to configure per project.
+The installer downloads the prebuilt release and opens the setup window on a Mac. It finds your agents, adds its hooks, sets the takeover order and hotkey, and starts the notch. There is nothing to configure per project.
+
+Setup also asks you to do two things in a terminal, because nowall can't do them for you:
+
+1. **Sign in to terminal Claude** with `claude auth login`. The desktop app has its own login, and Claude can't take over a task without this one.
+2. **Run `claude` and send one message.** Claude only reports usage there, so its usage rings stay plain until you do.
 
 To review each step yourself, run the same install by hand:
 
@@ -51,6 +56,12 @@ nowall setup
 Run on its own, `nowall setup` also offers to add extra accounts.
 
 If setup reports an agent that isn't signed in, run the login command it prints. nowall never signs in for you and never handles your agent logins.
+
+On Windows, run this in PowerShell instead:
+
+```powershell
+irm https://raw.githubusercontent.com/Vedthakar/nowall/main/install.ps1 | iex
+```
 
 To let Claude Code do the install, paste this prompt:
 
@@ -93,13 +104,27 @@ The notch is a small black tab on the right edge of your screen. It shows one sy
 | Rings around an account icon | Usage: outer ring is weekly, inner ring is the short window. Orange past 85% |
 | Single ring refilling | The account is cooling down until its limit resets |
 
-- **Hover** to see each session's repo and current activity, who built what, task progress, and every account's status.
-- **Right-click** for Settings (takeover order), refresh, hide for an hour, or quit.
+- **Click a bubble** to open that chat, in the Claude app or its terminal tab. Hover to see which chat it is.
+- **Double-click anywhere on the notch**, circles included, to see each session's repo and current activity, who built what, task progress, and every account's status.
+- **Right-click** to switch to a chosen account or cancel a switch, or for Settings (accounts and takeover order), refresh, hide for an hour, or quit.
+- **Cancel switch** on a session in the open notch stops its takeover. Its edits stay in your files, and `nowall undo` can roll them back.
 - **`nowall notch off`** hides it until you run `nowall notch on`. Failover keeps working either way.
 
 Clicks outside the notch pass through to whatever is underneath.
 
-Claude Code only reports usage through its terminal status line, so the desktop app's rings stay empty until you run a terminal `claude` turn. Cursor doesn't expose usage locally. Limits are still detected either way.
+A finished chat keeps its check mark until you click it. When more chats are running than fit, the rest show as "+N", and one that finishes or needs you swaps in for one that's still working.
+
+## Windows
+
+Windows support is new. The CLI, hooks, failover, multiple accounts, undo and uninstall are built to work as they do on a Mac, but so far they've only been tested with simulated agents, not real agent installs. Reports are welcome. A few things differ:
+
+- **No notch or setup window yet.** Setup runs in the terminal. Use `nowall status` to see where things stand and `nowall logs -f` to follow a takeover.
+- **Takeovers always run in the background.** `"takeover": "terminal"` falls back to `background`.
+- **`nowall open` only prints the session's folder**, and the `claude` shell shortcut from `nowall init --alias` isn't available. Use `nowall run claude`.
+- **In PowerShell, use `nowall.cmd`** if `nowall` is blocked by your execution policy.
+- **A Cursor API key** is stored in a file only your Windows user can read, not in a credential vault.
+- **Claude Code may flash a console window** each time it runs a hook. That comes from how Claude Code starts hooks on Windows, not from nowall.
+- **Cursor's own hooks have open Windows bugs,** especially with Git Bash, so its chats may not show up in `nowall status`. Cursor can still take over a task.
 
 ## How failover works
 
@@ -131,15 +156,18 @@ nowall account add claude work
 ```
 
 ```bash
-nowall account add cursor team --api-key
+nowall account add cursor team
 ```
 
 ```bash
 nowall order claude claude:work cursor cursor:team codex
 ```
 
-- Claude Code and Codex accounts get their own profile folder, and you sign in to them yourself.
-- Cursor allows one login per computer, so a second Cursor account uses an API key. It's stored in the macOS Keychain (a `0600` file elsewhere) and is only passed to `cursor-agent`.
+Or use **Add account** in Settings. For Cursor it opens the website: sign in with the other account and you're done. Claude Code and Codex open their sign-in in Terminal. The label is optional.
+
+- Each account gets its own profile folder and keeps its own login, apart from your main one. Cursor keeps these in its own `auth.json` inside that folder.
+- If your browser is already signed in to your main account, log out on the website first. nowall won't add the same account twice.
+- Prefer a Cursor API key? `nowall account add cursor team --api-key` keeps it in the macOS Keychain (elsewhere, a file only your user can read) and only passes it to `cursor-agent`.
 - Limits are tracked per account, so `claude:work` stays available while `claude` is cooling down.
 
 ## Commands
@@ -151,10 +179,14 @@ nowall order claude claude:work cursor cursor:team codex
 | `nowall demo` | Run a simulated failover with no real usage |
 | `nowall agents` | List agents with sign-in, cooldown and usage details |
 | `nowall status` | Show accounts, the last session and its checkpoints |
+| `nowall switch [--latest] [--to <account>]` | Hand a session to the next account now (also the hotkey, `⌃⌥⌘N` by default) |
+| `nowall cancel` | Stop a running takeover and keep its edits (also a button on the open notch, and the hotkey `⌃⌥⌘X` by default) |
+| `nowall pause [30m\|2h\|1d]` / `nowall resume` | Stop every takeover for a while, or end the pause |
+| `nowall off` / `nowall on` | Stop or allow takeovers in this repo |
 | `nowall logs [-f]` | Show or follow a background takeover in this repo |
 | `nowall undo [n]` | List checkpoints, or restore files to one. Never deletes files |
 | `nowall order [id ...]` | Show or set the takeover order |
-| `nowall account add\|list\|remove\|login\|verify` | Manage extra accounts |
+| `nowall account add\|list\|remove\|login\|verify` | Manage extra accounts (`add` opens the sign-in) |
 | `nowall notch [on\|off\|status]` | Show, hide or diagnose the notch |
 | `nowall run <agent>` | Run an agent under nowall in this terminal (optional) |
 | `nowall init` | Set up a single repo instead of all of them |
@@ -162,7 +194,7 @@ nowall order claude claude:work cursor cursor:team codex
 
 ## Configuration
 
-Settings live in `~/.config/nowall/config.json`. The notch's Settings window and `nowall order` edit the order for you.
+Settings live in `~/.config/nowall/config.json` (on Windows, `%USERPROFILE%\.config\nowall\config.json`). The notch's Settings window and `nowall order` edit the order for you.
 
 ```json
 {
@@ -183,7 +215,7 @@ Settings live in `~/.config/nowall/config.json`. The notch's Settings window and
 ## Privacy and security
 
 - **Local only.** nowall sends nothing anywhere. Your code goes only to the agents you already use, under their terms.
-- **Credentials.** nowall doesn't read or store agent logins. The one exception is a Cursor API key you add on purpose.
+- **Credentials.** nowall doesn't read agent logins. Each agent keeps its own, including in the separate profile folders it gets for extra accounts. nowall stores one thing itself: a Cursor API key, only if you add one on purpose.
 - **Redaction.** API keys, tokens, private keys, URL credentials and the values in your `.env` files are stripped from everything nowall writes.
 - **Snapshots.** Files matched by `.gitignore`, plus files such as `.env*`, `*.pem` and `*.key`, are left out of checkpoints.
 - **Untrusted repos.** nowall refuses repos that commit or symlink a `.handoff/` folder. Like any coding agent, an agent that takes over can still be influenced by what a repo contains.
@@ -207,8 +239,18 @@ nowall uninstall --global --purge --repos --npm
 
 Add `--dry-run` to either command to see what would change. Your own hooks and status line are left as they were.
 
+## Known bugs
+
+- **Claude's usage rings stay a plain circle until you run a terminal `claude` turn.** The desktop app doesn't report usage. Run `claude` in a terminal and send one message. The rings then show the numbers from your latest terminal turn, and clear when that usage window resets. Limits are still detected either way.
+- **Terminal Claude can't take over tasks until you run `claude auth login`.** Being signed in to the desktop app doesn't sign in the terminal version.
+
 ## Known limitations
 
+- A Cursor API key isn't checked when you add it, so a wrong key can show as signed in. Check one with `nowall account verify <id>`. During a takeover, an account whose login fails is skipped.
+- An extra Cursor account runs with its own home folder, so a takeover on it doesn't load your `~/.cursor` rules or MCP servers. Your git identity stays the same.
+- Cursor doesn't expose usage locally, so its circle has no rings.
+- Claude sessions that run in the cloud don't show in the notch. They leave nothing on your computer, and reaching them would mean reading your login, which nowall never does.
+- Clicking a Cursor IDE chat opens its workspace, not the exact chat.
 - Failover starts from Claude Code. A limit inside the Cursor IDE or an interactive Codex session doesn't start one yet.
 - A takeover runs in the background, and you can't type to it. Run the resume command in the summary to continue interactively.
 - The original Claude session isn't closed by a background takeover, so it can resume after its limit resets.
@@ -230,7 +272,7 @@ npm run lint && npm run typecheck && npm test
 npm run stress
 ```
 
-Tests never use real agents: `scripts/fake-agent.mjs` reproduces their output formats, limit errors and expired logins. `npm run build:notch` builds the macOS app and needs the Xcode command line tools.
+Tests never use real agents: `scripts/fake-agent.mjs` reproduces their output formats, limit errors and expired logins. `npm run build:notch` builds the macOS app and needs the Xcode command line tools. CI also installs nowall with `install.ps1` on Windows and runs `npm run smoke:windows`, which runs the hooks under cmd.exe, PowerShell and Git Bash.
 
 Bug reports and pull requests are welcome through [GitHub issues](https://github.com/Vedthakar/nowall/issues).
 

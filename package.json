@@ -1,6 +1,6 @@
 {
   "name": "nowall",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "When your coding agent hits its usage limit, the work keeps going in the next one.",
   "keywords": ["claude-code", "cursor", "codex", "ai-agents", "failover", "rate-limit", "cli"],
   "homepage": "https://github.com/Vedthakar/nowall#readme",
@@ -17,22 +17,30 @@
   "bin": {
     "nowall": "dist/cli.js"
   },
-  "files": ["dist", "scripts/fake-agent.mjs", "notch/build/NowallNotch.app", "install.sh"],
+  "files": [
+    "dist",
+    "scripts/fake-agent.mjs",
+    "notch/build/NowallNotch.app",
+    "install.sh",
+    "install.ps1"
+  ],
   "engines": {
     "node": ">=20"
   },
-  "os": ["darwin", "linux"],
+  "os": ["darwin", "linux", "win32"],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "lint": "biome check .",
     "format": "biome format --write .",
+    "test:windows": "vitest run test/windows.test.ts test/adapters.test.ts test/limits.test.ts test/packet.test.ts test/redact.test.ts test/state.test.ts test/git-session.test.ts",
+    "smoke:windows": "node scripts/windows-smoke.mjs",
     "stress": "npm run build && node scripts/stress.mjs",
     "prepublishOnly": "npm run lint && npm run typecheck && npm test",
     "build:notch": "sh scripts/build-notch.sh",
     "install:local": "npm install -g \"$(npm pack --silent --pack-destination \"${TMPDIR:-/tmp}\" | tail -1 | sed \"s#^#${TMPDIR:-/tmp}/#\")\"",
-    "prepare": "npm run build && npm run build:notch"
+    "prepare": "node scripts/prepare.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",

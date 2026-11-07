@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { classifyLimit } from "../limits.js";
-import { HOOK_MARK, cmdHook, mergeHooksFile, withHooks } from "./common.js";
+import { cmdHook, hookCommand, mergeHooksFile, withHooks } from "./common.js";
 import { type AgentAdapter, type AgentEvent, versionOf } from "./types.js";
 
 type Json = Record<string, unknown>;
@@ -98,7 +98,7 @@ export const codex: AgentAdapter = {
 };
 
 function codexHooks(existing: Record<string, unknown>, nowall: string): Record<string, unknown> {
-  const hook = (name: string) => `${HOOK_MARK} ${nowall} hook ${name} --agent codex`;
+  const hook = (name: string) => hookCommand(nowall, `hook ${name} --agent codex`);
   return withHooks(existing, {
     UserPromptSubmit: [cmdHook(hook("prompt"))],
     PostToolUse: [cmdHook(hook("post-tool"))],

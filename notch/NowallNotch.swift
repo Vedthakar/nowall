@@ -1,7 +1,9 @@
 // nowall notch: a small always-on-top status pill for macOS.
 // It only reads nowall's JSON status files (~/.config/nowall); it never runs agents itself.
-// The only things it writes are `order` and `hotkey` in config.json, from the Settings window.
-// The global hotkey runs `nowall switch` through the CLI it was started with.
+// The only things it writes are `order`, `hotkey` and `yolo` in config.json, from its windows, and
+// which finished sessions you've already looked at (notch-seen.json).
+// The global hotkey runs `nowall switch`, and clicking a bubble runs `nowall open`, through the CLI
+// it was started with. `--setup` opens the first-run window instead (SetupWizard.swift).
 // Build: scripts/build-notch.sh
 
 import AppKit
@@ -31,6 +33,8 @@ struct AgentInfo: Decodable, Identifiable {
     let name: String
     let installed: Bool
     let desktopOnly: Bool?
+    let desktopApp: Bool?
+    let installHint: String?
     let signedIn: SignIn
     let enabled: Bool
     let cooldownUntil: String?
@@ -92,6 +96,10 @@ struct SessionStatus: Decodable, Identifiable {
     let children: [Child]?
     /// The agent's own turn ended while children were still running.
     let turnEnded: Bool?
+    /// The session's folder isn't a git repo: shown here, but it can't fail over.
+    let noRepo: Bool?
+    let origin: Origin?
+    struct Origin: Decodable { let kind: String? }
     var id: String { sid }
     /// The account this session runs as (defaults to the agent's own login).
     var who: String { account ?? agent }
@@ -110,7 +118,7 @@ struct SessionStatus: Decodable, Identifiable {
 
     enum Keys: String, CodingKey {
         case sid, repoName, phase, agent, account, detail, tasks, shares, startedAt, updatedAt
-        case parentSid, children, turnEnded
+        case parentSid, children, turnEnded, noRepo, origin
     }
 
     init(from decoder: Decoder) throws {
@@ -129,6 +137,8 @@ struct SessionStatus: Decodable, Identifiable {
         parentSid = try? c.decode(String.self, forKey: .parentSid)
         children = try? c.decode([Child].self, forKey: .children)
         turnEnded = try? c.decode(Bool.self, forKey: .turnEnded)
+        noRepo = try? c.decode(Bool.self, forKey: .noRepo)
+        origin = try? c.decode(Origin.self, forKey: .origin)
     }
 }
 
@@ -145,15 +155,21 @@ struct Slot: Identifiable {
     let limitMessage: String?
     let usage: [UsageWindow]?
     let loginHint: String
+    /// The Claude desktop app is installed: its chats work whatever the terminal CLI's login says.
+    let desktopApp: Bool
 
     init(account a: AccountInfo, agent g: AgentInfo) {
+        desktopApp = (g.desktopApp ?? false) && a.id == a.agent
         id = a.id; agent = a.agent; name = a.name; label = a.label; signedIn = a.signedIn
         desktopOnly = g.desktopOnly ?? false; active = a.active
-        cooldownUntil = a.cooldownUntil; limitMessage = a.limitMessage; usage = a.usage; loginHint = g.loginHint
+        // The agent's own login command would sign in the main account, not this one.
+        cooldownUntil = a.cooldownUntil; limitMessage = a.limitMessage; usage = a.usage
+        loginHint = a.id == a.agent ? g.loginHint : "nowall account login \(a.id)"
     }
 
     /// Older agents.json without `accounts`: one slot per agent.
     init(agent g: AgentInfo) {
+        desktopApp = g.desktopApp ?? false
         id = g.id; agent = g.id; name = g.name; label = ""; signedIn = g.signedIn
         desktopOnly = g.desktopOnly ?? false; active = g.enabled
         cooldownUntil = g.cooldownUntil; limitMessage = g.limitMessage; usage = g.usage; loginHint = g.loginHint
@@ -172,6 +188,40 @@ func parseDate(_ s: String?) -> Date? {
 }
 
 let activePhases: Set<String> = ["working", "needs-input", "handing-off"]
+/// Phases that mean "go and look": they keep a bubble until you've clicked it.
+let finishedPhases: Set<String> = ["your-turn", "done", "stopped", "paused"]
+/// How many bubbles fit on the tab; the rest are counted as "+N".
+let maxBubbles = 4
+
+/// How urgently a bubble wants to be seen. Lower is more urgent.
+func bubbleRank(_ phase: String) -> Int {
+    switch phase {
+    case "needs-input": return 0
+    case "handing-off": return 1
+    case "working": return 3
+    default: return 2 // finished
+    }
+}
+
+/// Which sessions get a bubble. Bubbles keep their place while they can. When everything is full,
+/// a session that needs you takes the place of the one that needs you least, so a chat finishing
+/// in the "+N" pile swaps with one still working: you can see it and click it, and the working one
+/// joins the pile. `all` is newest first.
+func reconcileBubbles(shown: [String], all: [(id: String, rank: Int)], capacity: Int = maxBubbles) -> [String] {
+    let rank = Dictionary(all.map { ($0.id, $0.rank) }, uniquingKeysWith: { a, _ in a })
+    var out = shown.filter { rank[$0] != nil }
+    let waiting = all.filter { !out.contains($0.id) }
+    for s in waiting.enumerated().sorted(by: { ($0.element.rank, $0.offset) < ($1.element.rank, $1.offset) }).map(\.element) {
+        if out.count < capacity { out.append(s.id); continue }
+        var worst: Int?
+        for (i, id) in out.enumerated() where (rank[id] ?? 0) > s.rank {
+            if let w = worst, (rank[out[w]] ?? 0) >= (rank[id] ?? 0) { continue }
+            worst = i
+        }
+        if let worst { out[worst] = s.id }
+    }
+    return out
+}
 /// A session still marked "working" but silent this long is treated as idle (its hooks stopped firing).
 let staleAfter: TimeInterval = 30 * 60
 
@@ -183,11 +233,13 @@ struct HotKeyCombo: Equatable {
     var modifiers: UInt32 // Carbon flags
     var display: String
 
+    /// The default for cancelling a takeover.
+    static let cancelDefault = HotKeyCombo(keyCode: UInt32(kVK_ANSI_X), modifiers: UInt32(controlKey | optionKey | cmdKey), display: "⌃⌥⌘X")
+
     static let `default` = HotKeyCombo(keyCode: UInt32(kVK_ANSI_N), modifiers: UInt32(controlKey | optionKey | cmdKey), display: "⌃⌥⌘N")
 
     /// "ctrl+alt+cmd+n" → combo; nil when the string makes no sense (then the default is used).
-    static func parse(_ s: String) -> HotKeyCombo? {
-        let keys: [String: Int] = [
+    static let keys: [String: Int] = [
             "a": kVK_ANSI_A, "b": kVK_ANSI_B, "c": kVK_ANSI_C, "d": kVK_ANSI_D, "e": kVK_ANSI_E, "f": kVK_ANSI_F,
             "g": kVK_ANSI_G, "h": kVK_ANSI_H, "i": kVK_ANSI_I, "j": kVK_ANSI_J, "k": kVK_ANSI_K, "l": kVK_ANSI_L,
             "m": kVK_ANSI_M, "n": kVK_ANSI_N, "o": kVK_ANSI_O, "p": kVK_ANSI_P, "q": kVK_ANSI_Q, "r": kVK_ANSI_R,
@@ -196,7 +248,21 @@ struct HotKeyCombo: Equatable {
             "4": kVK_ANSI_4, "5": kVK_ANSI_5, "6": kVK_ANSI_6, "7": kVK_ANSI_7, "8": kVK_ANSI_8, "9": kVK_ANSI_9,
             "space": kVK_Space, "f1": kVK_F1, "f2": kVK_F2, "f3": kVK_F3, "f4": kVK_F4, "f5": kVK_F5, "f6": kVK_F6,
             "f7": kVK_F7, "f8": kVK_F8, "f9": kVK_F9, "f10": kVK_F10, "f11": kVK_F11, "f12": kVK_F12,
-        ]
+    ]
+
+    /// A combo from a key press (the recorder). Nil for a key we can't name or no modifier.
+    static func from(keyCode: UInt16, flags: NSEvent.ModifierFlags) -> HotKeyCombo? {
+        guard let name = keys.first(where: { $0.value == Int(keyCode) })?.key else { return nil }
+        var parts: [String] = []
+        if flags.contains(.control) { parts.append("ctrl") }
+        if flags.contains(.option) { parts.append("alt") }
+        if flags.contains(.shift) { parts.append("shift") }
+        if flags.contains(.command) { parts.append("cmd") }
+        guard !parts.isEmpty else { return nil }
+        return parse((parts + [name]).joined(separator: "+"))
+    }
+
+    static func parse(_ s: String) -> HotKeyCombo? {
         var mods: UInt32 = 0
         var text = ""
         var key: Int?
@@ -235,16 +301,36 @@ final class Store: ObservableObject {
     @Published var sessions: [SessionStatus] = []
     @Published var now = Date()
     @Published var expanded = false
+    /// Sessions drawn as bubbles on the tab, in place order (see `reconcileBubbles`).
+    @Published var bubbleIDs: [String] = []
+    /// The bubble or card row under the mouse.
+    @Published var hoveredSid: String?
+    /// Chat titles from the Claude desktop app, by session id.
+    @Published var titles: [String: String] = [:]
     @Published var toast: Toast?
     /// Briefly true after the hotkey fires, so the tab can flash.
     @Published var flash = false
     /// From config.json: `hotkey` (missing/true = default combo, false = off, string = custom).
     @Published var hotkeyEnabled = true
     @Published var hotkey: HotKeyCombo = .default
+    /// From config.json: `cancelHotkey`, read the same way.
+    @Published var cancelHotkeyEnabled = true
+    @Published var cancelHotkey: HotKeyCombo = .cancelDefault
+    /// Set while a Cursor sign-in is waiting on the website.
+    @Published var addingAccount = false
+    /// What the last Add account came to, for the form.
+    @Published var addResult: (text: String, ok: Bool)?
+    private var addProcess: Process?
     /// From config.json `pausedUntil` (nowall pause): hooks are not taking over until then.
     @Published var pausedUntil: Date?
     /// Where the visible shape is inside the window (SwiftUI coordinates), for hover tracking.
     var shapeRect: CGRect = .zero
+    /// Where each clickable bubble or row is (same coordinates).
+    var clickRects: [String: CGRect] = [:]
+    /// Stand in for opening a chat and cancelling a takeover under `--click-test`.
+    var onOpenChat: ((String) -> Void)?
+    var onCancel: ((String) -> Void)?
+    @Published var cancelling: Set<String> = []
     /// Called when the hotkey setting changes (the app delegate re-registers it).
     var onHotkeyChange: (() -> Void)?
 
@@ -258,14 +344,47 @@ final class Store: ObservableObject {
     private var lastConfigRead = Date.distantPast
     private var lastPhases: [String: String]?
     private var switching: Process?
+    /// updatedAt of each finished session at the moment you looked at it.
+    private var seen: [String: String] = [:]
+    private var watcher: DispatchSourceFileSystemObject?
+    private var pendingTick = false
+    private var lastIndex = Date.distantPast
+    private var indexMtimes: [String: Date] = [:]
+    private var indexRows: [String: (sid: String, title: String, archived: Bool)] = [:]
+    private var archived: Set<String> = []
+    private var indexing = false
 
     init(home: URL, node: String?, cli: String?, fixedNow: Date? = nil) {
         self.home = home
         self.node = node
         self.cli = cli
         self.fixedNow = fixedNow
+        loadSeen()
         tick()
+        guard fixedNow == nil else { return }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.tick() }
+        watchStatus()
+    }
+
+    /// Redraws as soon as a hook writes a status file, instead of on the next one-second tick.
+    private func watchStatus() {
+        let dir = home.appendingPathComponent("status")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let fd = open(dir.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let src = DispatchSource.makeFileSystemObjectSource(fileDescriptor: fd, eventMask: [.write, .rename, .delete], queue: .main)
+        src.setEventHandler { [weak self] in
+            guard let self, !self.pendingTick else { return }
+            self.pendingTick = true
+            // A burst of hooks (a subagent fleet) costs one redraw.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+                self.pendingTick = false
+                self.tick()
+            }
+        }
+        src.setCancelHandler { close(fd) }
+        src.resume()
+        watcher = src
     }
 
     func tick() {
@@ -291,11 +410,15 @@ final class Store: ObservableObject {
             guard let d = try? Data(contentsOf: f), let s = try? dec.decode(SessionStatus.self, from: d) else { continue }
             let age = now.timeIntervalSince(parseDate(s.updatedAt) ?? .distantPast)
             let active = activePhases.contains(s.phase)
-            // Finished sessions linger briefly so you can see the result, then disappear.
-            if active ? age < 6 * 3600 : age < (s.phase == "ended" ? 20 : 15 * 60) { list.append(s) }
+            // A finished chat waits (hours, if need be) until you've looked at it. A closed one
+            // lingers just long enough to notice, an idle one a little longer.
+            let keep: TimeInterval = active || finishedPhases.contains(s.phase) ? 6 * 3600 : (s.phase == "ended" ? 20 : 15 * 60)
+            if age < keep, !archived.contains(s.sid) { list.append(s) }
         }
         sessions = list.sorted { ($0.updatedAt) > ($1.updatedAt) }
+        reconcile()
         noticeTransitions()
+        refreshTitles()
         if now.timeIntervalSince(lastRefresh) > 60 { refreshAgents() }
     }
 
@@ -309,13 +432,134 @@ final class Store: ObservableObject {
         var combo = HotKeyCombo.default
         if let b = cfg["hotkey"] as? Bool { enabled = b }
         else if let s = cfg["hotkey"] as? String { combo = HotKeyCombo.parse(s) ?? .default }
-        if enabled != hotkeyEnabled || combo != hotkey {
+        var cancelEnabled = true
+        var cancelCombo = HotKeyCombo.cancelDefault
+        if let b = cfg["cancelHotkey"] as? Bool { cancelEnabled = b }
+        else if let s = cfg["cancelHotkey"] as? String { cancelCombo = HotKeyCombo.parse(s) ?? .cancelDefault }
+        if enabled != hotkeyEnabled || combo != hotkey || cancelEnabled != cancelHotkeyEnabled || cancelCombo != cancelHotkey {
             hotkeyEnabled = enabled
             hotkey = combo
+            cancelHotkeyEnabled = cancelEnabled
+            cancelHotkey = cancelCombo
             onHotkeyChange?()
         }
         let paused = parseDate(cfg["pausedUntil"] as? String).flatMap { $0 > now ? $0 : nil }
         if paused != pausedUntil { pausedUntil = paused }
+    }
+
+    // MARK: Bubbles
+
+    func isUnseen(_ s: SessionStatus) -> Bool {
+        finishedPhases.contains(s.effectivePhase) && seen[s.sid] != s.updatedAt
+    }
+
+    private func isLive(_ s: SessionStatus) -> Bool {
+        activePhases.contains(s.effectivePhase) && now.timeIntervalSince(parseDate(s.updatedAt) ?? .distantPast) < staleAfter
+    }
+
+    /// Everything that wants a bubble: running now, or finished and not looked at yet.
+    var bubbleCandidates: [SessionStatus] { visibleSessions.filter { isLive($0) || isUnseen($0) } }
+    var bubbles: [SessionStatus] {
+        let byId = Dictionary(sessions.map { ($0.sid, $0) }, uniquingKeysWith: { a, _ in a })
+        return bubbleIDs.compactMap { byId[$0] }
+    }
+    var overflow: Int { max(0, bubbleCandidates.count - bubbleIDs.count) }
+
+    private func reconcile() {
+        let next = reconcileBubbles(shown: bubbleIDs, all: bubbleCandidates.map { (id: $0.sid, rank: bubbleRank($0.effectivePhase)) })
+        if next != bubbleIDs { bubbleIDs = next }
+    }
+
+    /// What people call a session: the app's chat title when there is one, else its repo.
+    func displayName(_ s: SessionStatus) -> String { titles[s.sid] ?? s.repoName }
+
+    /// A click on a bubble or card row: go to that chat, and mark what was finished as seen.
+    func openChat(_ sid: String) {
+        if let onOpenChat { onOpenChat(sid); return }
+        guard let s = sessions.first(where: { $0.sid == sid }) else { return }
+        if finishedPhases.contains(s.effectivePhase) {
+            seen[sid] = s.updatedAt
+            saveSeen()
+            reconcile()
+        }
+        guard let node, let cli else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = [cli, "open", "--sid", sid]
+        var env = ProcessInfo.processInfo.environment
+        env["NOWALL_HOME"] = home.path
+        p.environment = env
+        p.standardOutput = FileHandle.nullDevice
+        let err = Pipe()
+        p.standardError = err
+        let name = displayName(s)
+        p.terminationHandler = { [weak self] proc in
+            guard proc.terminationStatus != 0 else { return }
+            let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            fputs("notch: nowall open failed: \(e)\n", stderr)
+            DispatchQueue.main.async { self?.show("Couldn't open \(name)", tone: "warn", seconds: 4) }
+        }
+        do { try p.run() } catch {
+            fputs("notch: could not run nowall open: \(error)\n", stderr)
+            show("Couldn't open \(name)", tone: "warn", seconds: 4)
+        }
+    }
+
+    private var seenPath: URL { home.appendingPathComponent("notch-seen.json") }
+
+    private func loadSeen() {
+        guard let d = try? Data(contentsOf: seenPath),
+              let j = try? JSONDecoder().decode([String: String].self, from: d) else { return }
+        seen = j
+    }
+
+    private func saveSeen() {
+        let alive = Set(sessions.map(\.sid))
+        seen = seen.filter { alive.contains($0.key) }
+        if let d = try? JSONEncoder().encode(seen) { try? d.write(to: seenPath, options: .atomic) }
+    }
+
+    /// Chat titles and archived chats from the Claude desktop app's session files. These can run to
+    /// hundreds of KB each, so only changed files are parsed, off the main thread, every 5 seconds.
+    private func refreshTitles() {
+        guard fixedNow == nil, !indexing, now.timeIntervalSince(lastIndex) > 5 else { return }
+        lastIndex = now
+        indexing = true
+        let root = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/Claude/claude-code-sessions")
+        let mtimes = indexMtimes, rows = indexRows
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var nextTimes: [String: Date] = [:]
+            var nextRows: [String: (sid: String, title: String, archived: Bool)] = [:]
+            let fm = FileManager.default
+            for a in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
+                for b in (try? fm.contentsOfDirectory(atPath: "\(root)/\(a)")) ?? [] {
+                    for f in (try? fm.contentsOfDirectory(atPath: "\(root)/\(a)/\(b)")) ?? [] where f.hasPrefix("local_") && f.hasSuffix(".json") {
+                        let path = "\(root)/\(a)/\(b)/\(f)"
+                        guard let m = (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date else { continue }
+                        nextTimes[path] = m
+                        if mtimes[path] == m, let r = rows[path] { nextRows[path] = r; continue }
+                        guard let d = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                              let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                              let cli = j["cliSessionId"] as? String else { continue }
+                        nextRows[path] = (sid: "c_\(cli)", title: j["title"] as? String ?? "", archived: j["isArchived"] as? Bool ?? false)
+                    }
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.indexing = false
+                self.indexMtimes = nextTimes
+                self.indexRows = nextRows
+                var titles: [String: String] = [:]
+                var archived: Set<String> = []
+                for r in nextRows.values {
+                    if r.archived { archived.insert(r.sid) }
+                    if !r.title.isEmpty { titles[r.sid] = r.title }
+                }
+                if titles != self.titles { self.titles = titles }
+                self.archived = archived
+            }
+        }
     }
 
     /// Toast (and, best effort, a notification) when a session starts switching agents or finishes
@@ -329,7 +573,7 @@ final class Store: ObservableObject {
             if s.phase == "handing-off" {
                 let who = shortName(s.who)
                 let detail = (s.detail?.isEmpty ?? true) ? "handing the task to the next account" : s.detail!
-                show("\(s.repoName): \(who) stopped · \(detail)", tone: "warn", seconds: 5)
+                show("\(displayName(s)): \(who) stopped · \(detail)", tone: "warn", seconds: 5)
                 notify(title: "nowall is switching agents", body: "\(s.repoName): \(who) · \(detail)")
             } else if s.phase == "done", let shares = s.shares, shares.count > 1 {
                 let total = max(1, shares.reduce(0) { $0 + $1.lines })
@@ -368,9 +612,52 @@ final class Store: ObservableObject {
         }
     }
 
-    /// The hotkey / "Switch now": hands the most recent live session to the next account via
-    /// `nowall switch --sid <sid>`. Runs the CLI the notch was started with.
-    func switchLatest() {
+    /// Takeovers that are running right now, newest first: these can be cancelled.
+    var takeovers: [SessionStatus] {
+        live.filter { $0.origin?.kind == "takeover" || $0.effectivePhase == "handing-off" }
+    }
+
+    /// Stops a takeover with `nowall cancel`. Its edits stay in the repo.
+    func cancelTakeover(_ sid: String) {
+        if let onCancel { onCancel(sid); return }
+        guard let node, let cli, !cancelling.contains(sid) else { return }
+        cancelling.insert(sid)
+        show("Stopping the takeover…", tone: "info", seconds: 15)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = [cli, "cancel", "--sid", sid]
+        var env = ProcessInfo.processInfo.environment
+        env["NOWALL_HOME"] = home.path
+        p.environment = env
+        p.standardOutput = FileHandle.nullDevice
+        let err = Pipe()
+        p.standardError = err
+        p.terminationHandler = { [weak self] proc in
+            let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                self?.cancelling.remove(sid)
+                if proc.terminationStatus == 0 {
+                    self?.show("Takeover stopped. Its edits are kept", tone: "ok", seconds: 5)
+                } else {
+                    self?.show(e.isEmpty ? "Couldn't stop the takeover" : e.replacingOccurrences(of: "nowall cancel: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines), tone: "warn", seconds: 6)
+                }
+                self?.tick()
+            }
+        }
+        do { try p.run() } catch {
+            cancelling.remove(sid)
+            show("Couldn't stop the takeover", tone: "warn", seconds: 5)
+        }
+    }
+
+    /// Accounts the running session could be handed to from the notch's menu.
+    var switchTargets: [Slot] {
+        allSlots.filter { $0.active && !$0.desktopOnly && $0.signedIn != .no && $0.id != live.first?.who }
+    }
+
+    /// The hotkey / "Switch now": hands the most recent live session to the next account, or to `to`,
+    /// via `nowall switch --sid <sid>`. Runs the CLI the notch was started with.
+    func switchLatest(to: String? = nil) {
         flash = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.flash = false }
         guard let s = live.first else { show("Nothing is running right now", tone: "warn"); return }
@@ -379,7 +666,7 @@ final class Store: ObservableObject {
         show("Switching \(s.repoName) away from \(shortName(s.who))…", tone: "info", seconds: 20)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: node)
-        p.arguments = [cli, "switch", "--sid", s.sid]
+        p.arguments = [cli, "switch", "--sid", s.sid] + (to.map { ["--to", $0] } ?? [])
         var env = ProcessInfo.processInfo.environment
         env["NOWALL_HOME"] = home.path
         p.environment = env
@@ -454,6 +741,93 @@ final class Store: ObservableObject {
 
     /// `hotkey: false` turns it off; turning it back on removes the key (default combo) unless a
     /// custom combo string was set, which is kept as is.
+    func saveHotkey(combo: HotKeyCombo) {
+        patchConfig("hotkey", combo == .default ? nil : configString(combo))
+        lastConfigRead = .distantPast
+        readConfig()
+    }
+
+    func saveCancelHotkey(combo: HotKeyCombo) {
+        patchConfig("cancelHotkey", combo == .cancelDefault ? nil : configString(combo))
+        lastConfigRead = .distantPast
+        readConfig()
+    }
+
+    func saveCancelHotkey(enabled: Bool) {
+        if enabled {
+            patchConfig("cancelHotkey", cancelHotkey == .cancelDefault ? nil : configString(cancelHotkey))
+        } else {
+            patchConfig("cancelHotkey", false)
+        }
+        lastConfigRead = .distantPast
+        readConfig()
+    }
+
+    /// The cancel hotkey: stops the newest running takeover.
+    func cancelLatestTakeover() {
+        flash = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.flash = false }
+        guard let s = takeovers.first else { show("No switch to cancel", tone: "warn"); return }
+        cancelTakeover(s.sid)
+    }
+
+    /// The PATH setup saved from the person's own shell: GUI apps don't get it.
+    var shellPath: String? {
+        (try? Data(contentsOf: home.appendingPathComponent("config.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["path"] as? String
+    }
+
+    /// Adds a Cursor account with no Terminal: the sign-in opens on the website, and nowall works
+    /// out from there whether it's a new account. Stopping it takes the account back out.
+    func addAccountInBackground(agent: String, label: String) {
+        guard let node, let cli, addProcess == nil else { return }
+        addResult = nil
+        addingAccount = true
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: node)
+        p.arguments = [cli, "account", "add", agent] + (label.isEmpty ? [] : [label])
+        var env = ProcessInfo.processInfo.environment
+        env["NOWALL_HOME"] = home.path
+        if let shellPath { env["PATH"] = shellPath + ":" + (env["PATH"] ?? "") }
+        p.environment = env
+        p.standardInput = FileHandle.nullDevice
+        let out = Pipe(), err = Pipe()
+        p.standardOutput = out
+        p.standardError = err
+        p.terminationHandler = { [weak self] proc in
+            let o = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let e = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let stopped = proc.terminationReason == .uncaughtSignal || proc.terminationStatus == 130
+                self.addProcess = nil
+                self.addingAccount = false
+                if stopped {
+                    self.addResult = nil
+                } else if proc.terminationStatus == 0 {
+                    let added = o.split(separator: "\n").first { $0.hasPrefix("Added ") }.map(String.init)
+                    self.addResult = (added ?? "Added.", true)
+                } else {
+                    let last = e.split(separator: "\n").last.map(String.init)
+                    self.addResult = (last ?? "That didn't work. Try again.", false)
+                }
+                self.tick()
+            }
+        }
+        do {
+            try p.run()
+            addProcess = p
+        } catch {
+            addingAccount = false
+            addResult = ("Couldn't start the sign-in.", false)
+        }
+    }
+
+    func cancelAddAccount() { addProcess?.terminate() }
+
+    /// Full access for agents that take over, as `nowall setup --yolo` sets it.
+    func saveYolo(_ on: Bool) { patchConfig("yolo", on) }
+
     func saveHotkey(enabled: Bool) {
         if enabled {
             patchConfig("hotkey", hotkey == .default ? nil : configString(hotkey))
@@ -465,7 +839,7 @@ final class Store: ObservableObject {
     }
 
     /// Back from a combo to the config spelling ("ctrl+alt+cmd+n").
-    private func configString(_ c: HotKeyCombo) -> String {
+    func configString(_ c: HotKeyCombo) -> String {
         var parts: [String] = []
         if c.modifiers & UInt32(controlKey) != 0 { parts.append("ctrl") }
         if c.modifiers & UInt32(optionKey) != 0 { parts.append("alt") }
@@ -486,7 +860,7 @@ final class Store: ObservableObject {
         cfg["v"] = cfg["v"] ?? 1
         cfg["order"] = ids
         var enabled = cfg["enabled"] as? [String: Any] ?? [:]
-        for id in ids { enabled[String(id.split(separator: ":")[0])] = true }
+        for id in ids { if let first = id.split(separator: ":").first { enabled[String(first)] = true } }
         cfg["enabled"] = enabled
         guard let out = try? JSONSerialization.data(withJSONObject: cfg, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
@@ -519,10 +893,13 @@ func countdown(_ until: Date, now: Date) -> String {
     return "\(s)s"
 }
 
+/// The clock `--snapshot --now` pins, so a time renders as it would on that day.
+var pinnedNow: Date?
+
 func clock(_ d: Date) -> String {
     let f = DateFormatter()
     f.timeStyle = .short
-    f.dateStyle = Calendar.current.isDateInToday(d) ? .none : .short
+    f.dateStyle = Calendar.current.isDate(d, inSameDayAs: pinnedNow ?? Date()) ? .none : .short
     return f.string(from: d)
 }
 
@@ -533,14 +910,18 @@ func shortName(_ who: String) -> String {
     return parts.count > 1 ? "\(base) (\(parts[1]))" : base
 }
 
+/// Only a login that can't be used at all gets the warning color.
+func slotWarns(_ s: Slot) -> Bool { s.signedIn == .no && !s.desktopApp }
+
 func usageLine(_ usage: [UsageWindow]) -> String {
     usage.map { "\(Int($0.usedPct.rounded()))% of \($0.weekly ? "week" : $0.label)" }.joined(separator: " · ")
 }
 
 func slotLine(_ s: Slot, now: Date) -> String {
     if let until = parseDate(s.cooldownUntil), until > now { return "Limit reached · back in \(countdown(until, now: now))" }
-    if s.signedIn == .no { return s.loginHint.isEmpty ? "Not signed in" : "Not signed in · \(s.loginHint)" }
     if let u = s.usage, !u.isEmpty { return usageLine(u) }
+    if s.signedIn == .no, s.desktopApp { return "Desktop app · terminal signed out" }
+    if s.signedIn == .no { return s.loginHint.isEmpty ? "Not signed in" : "Not signed in · \(s.loginHint)" }
     if s.desktopOnly { return "Desktop app · ready" }
     return "Ready"
 }
@@ -671,13 +1052,17 @@ struct AgentIcon: View {
                 RechargeRing(from: until.addingTimeInterval(-5 * 3600), until: until, now: now, color: b.color)
             } else if let u = slot.usage, !u.isEmpty {
                 UsageRings(usage: u, color: b.color, size: size)
+            } else {
+                // No usage numbers for this one (Cursor, or Claude before a terminal turn): the circle
+                // stays, so every account reads the same at a glance.
+                Circle().stroke(b.color.opacity(slotWarns(slot) ? 0.3 : 0.6), lineWidth: size >= 28 ? 2.4 : 1.8)
             }
             if active {
-                Circle().stroke(b.color.opacity(0.9), lineWidth: 1.4).padding(rings ? 6.5 : 0)
+                Circle().stroke(b.color, lineWidth: rings ? 1.4 : 2).padding(rings ? 6.5 : 0)
             }
             Image(systemName: b.symbol)
                 .font(.system(size: size * (rings ? 0.38 : 0.46), weight: .semibold))
-                .foregroundColor(b.color.opacity(cooling || slot.signedIn == .no ? 0.45 : 1))
+                .foregroundColor(b.color.opacity(cooling || slotWarns(slot) ? 0.45 : 1))
             if let first = slot.label.first {
                 Text(String(first).uppercased())
                     .font(.system(size: max(6, size * 0.3), weight: .heavy, design: .rounded))
@@ -758,18 +1143,27 @@ struct SessionGlyph: View {
 struct TabContent: View {
     @ObservedObject var store: Store
     var body: some View {
-        let live = store.live
-        VStack(spacing: 9) {
-            if live.isEmpty {
-                let s = store.primary
-                PhaseGlyph(phase: s?.effectivePhase ?? "idle", color: brand(s?.who ?? "claude").color)
+        let bubbles = store.bubbles
+        VStack(spacing: 7) {
+            if bubbles.isEmpty {
+                PhaseGlyph(phase: "idle", color: brand("claude").color).frame(width: 24, height: 24)
             } else {
-                ForEach(live.prefix(4)) { s in SessionGlyph(s: s) }
-                if live.count > 4 {
-                    Text("+\(live.count - 4)").font(.system(size: 9, weight: .bold, design: .rounded))
-                        .foregroundColor(.white.opacity(0.6))
+                ForEach(bubbles) { s in
+                    SessionGlyph(s: s)
+                        .frame(width: 24, height: 24)
+                        .background(Circle().fill(Color.white.opacity(store.hoveredSid == s.sid ? 0.18 : 0)))
+                        .scaleEffect(store.hoveredSid == s.sid ? 1.12 : 1)
+                        .animation(.spring(response: 0.22, dampingFraction: 0.7), value: store.hoveredSid)
+                        .reportClickRect(s.sid)
+                        .transition(.scale(scale: 0.4).combined(with: .opacity))
+                }
+                if store.overflow > 0 {
+                    Text("+\(store.overflow)").font(.system(size: 9.5, weight: .bold, design: .rounded))
+                        .foregroundColor(.white.opacity(0.65))
+                        .help("\(store.overflow) more working in the background")
                 }
             }
+            Rectangle().fill(Color.white.opacity(0.12)).frame(width: 16, height: 1).padding(.vertical, 1)
             ForEach(store.slots) { a in
                 AgentIcon(slot: a, active: store.isWorking(a), now: store.now, size: 22)
             }
@@ -779,6 +1173,25 @@ struct TabContent: View {
             }
         }
         .frame(width: 26)
+        .animation(.spring(response: 0.34, dampingFraction: 0.78), value: store.bubbleIDs)
+    }
+}
+
+/// Marks a click target as the cancel button of a session, not the session itself.
+let stopPrefix = "stop:"
+
+/// Clicks reach it through `AppDelegate.handleClick`, like every other target in this panel.
+struct CancelTakeoverPill: View {
+    let stopping: Bool
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "stop.fill").font(.system(size: 7, weight: .bold))
+            Text(stopping ? "Stopping…" : "Cancel switch").font(.system(size: 10, weight: .semibold))
+        }
+        .foregroundColor(.white.opacity(stopping ? 0.5 : 0.9))
+        .padding(.horizontal, 9).padding(.vertical, 4)
+        .background(Capsule().fill(Color.white.opacity(0.14)))
+        .contentShape(Capsule())
     }
 }
 
@@ -786,8 +1199,13 @@ struct TabContent: View {
 struct CardContent: View {
     @ObservedObject var store: Store
     var body: some View {
-        let sessions = store.visibleSessions
-        VStack(alignment: .leading, spacing: 11) {
+        // What needs you first; among equals, the most recent.
+        let sessions = store.visibleSessions.enumerated().sorted {
+            let a = store.isUnseen($0.element) || activePhases.contains($0.element.effectivePhase) ? bubbleRank($0.element.effectivePhase) : 4
+            let b = store.isUnseen($1.element) || activePhases.contains($1.element.effectivePhase) ? bubbleRank($1.element.effectivePhase) : 4
+            return (a, $0.offset) < (b, $1.offset)
+        }.map(\.element)
+        VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 6) {
                 Text("nowall").font(.system(size: 11, weight: .bold, design: .rounded)).foregroundColor(.white.opacity(0.45))
                 if let p = store.pausedUntil {
@@ -807,7 +1225,16 @@ struct CardContent: View {
                 Text("All quiet. nowall is watching your agents.")
                     .font(.system(size: 10.5)).foregroundColor(.white.opacity(0.55))
             }
-            ForEach(sessions.prefix(5)) { s in SessionRow(s: s, now: store.now) }
+            ForEach(sessions.prefix(5)) { s in
+                VStack(alignment: .leading, spacing: 4) {
+                    SessionRow(s: s, name: store.displayName(s), now: store.now, unseen: store.isUnseen(s), hovered: store.hoveredSid == s.sid)
+                    if store.takeovers.contains(where: { $0.sid == s.sid }) {
+                        CancelTakeoverPill(stopping: store.cancelling.contains(s.sid))
+                            .reportClickRect(stopPrefix + s.sid)
+                    }
+                }
+                .reportClickRect(s.sid)
+            }
             if sessions.count > 5 {
                 Text("+\(sessions.count - 5) more").font(.system(size: 9.5)).foregroundColor(.white.opacity(0.45))
             }
@@ -822,21 +1249,26 @@ struct CardContent: View {
 
 struct SessionRow: View {
     let s: SessionStatus
+    let name: String
     let now: Date
+    let unseen: Bool
+    let hovered: Bool
     var body: some View {
         let b = brand(s.who)
         let phase = s.effectivePhase
         let stale = activePhases.contains(phase) && now.timeIntervalSince(parseDate(s.updatedAt) ?? .distantPast) >= staleAfter
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
-                PhaseGlyph(phase: stale ? "idle" : phase, color: b.color)
-                Text(s.repoName).font(.system(size: 12, weight: .semibold)).foregroundColor(.white)
-                Spacer()
+                PhaseGlyph(phase: stale || (finishedPhases.contains(phase) && !unseen) ? "idle" : phase, color: b.color)
+                Text(name).font(.system(size: 12, weight: .semibold)).foregroundColor(.white).lineLimit(1)
+                Spacer(minLength: 6)
                 Text(stale ? "\(shortName(s.who)) quiet" : phaseLabel(s)).font(.system(size: 10, weight: .medium))
-                    .foregroundColor(stale ? .white.opacity(0.5) : b.color)
+                    .foregroundColor(stale ? .white.opacity(0.5) : b.color).lineLimit(1).fixedSize()
+                Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.white.opacity(hovered ? 0.8 : 0.25))
             }
             if let d = s.detail, !d.isEmpty {
-                Text(d).font(.system(size: 10.5)).foregroundColor(.white.opacity(0.6)).lineLimit(1)
+                Text(name == s.repoName || s.noRepo == true ? d : "\(s.repoName) · \(d)").font(.system(size: 10.5)).foregroundColor(.white.opacity(0.6)).lineLimit(1)
             }
             if s.childCount > 0, !stale {
                 HStack(spacing: 4) {
@@ -861,6 +1293,10 @@ struct SessionRow: View {
                 Text("\(t.done) of \(t.total) tasks done").font(.system(size: 9.5)).foregroundColor(.white.opacity(0.5))
             }
         }
+        .padding(.vertical, 4).padding(.horizontal, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.white.opacity(hovered ? 0.09 : 0)))
+        .padding(.horizontal, -6)
+        .contentShape(Rectangle())
     }
 
     func pct(_ s: Share, _ all: [Share]) -> Int {
@@ -891,6 +1327,23 @@ struct SessionRow: View {
     }
 }
 
+/// The small label next to a hovered bubble: which chat it is and what it's doing.
+struct BubbleLabel: View {
+    let s: SessionStatus
+    let name: String
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(name).font(.system(size: 11, weight: .semibold)).foregroundColor(.white).lineLimit(1)
+            Text("\(SessionRow(s: s, name: name, now: Date(), unseen: true, hovered: false).phaseLabel(s)) · click to open")
+                .font(.system(size: 10)).foregroundColor(.white.opacity(0.6)).lineLimit(1)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 7)
+        .frame(maxWidth: 250, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.black).shadow(color: .black.opacity(0.3), radius: 6))
+        .transition(.opacity.combined(with: .move(edge: .trailing)))
+    }
+}
+
 struct AgentRow: View {
     let a: Slot
     let working: Bool
@@ -902,7 +1355,7 @@ struct AgentRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(a.name).font(.system(size: 11.5, weight: .semibold)).foregroundColor(.white)
                 Text(slotLine(a, now: now)).font(.system(size: 10))
-                    .foregroundColor(a.signedIn == .no ? .orange : .white.opacity(0.55)).lineLimit(1)
+                    .foregroundColor(slotWarns(a) ? .orange : .white.opacity(0.55)).lineLimit(1)
             }
             Spacer()
             if let u = a.usage, !u.isEmpty, !(parseDate(a.cooldownUntil).map { $0 > now } ?? false) {
@@ -987,14 +1440,19 @@ struct ToastBubble: View {
 }
 
 let fillet: CGFloat = 10
-let windowSize = CGSize(width: 340, height: 640)
+/// Grows to fit the screen when the app starts; the card can get tall with many accounts.
+var windowSize = CGSize(width: 360, height: 640)
 
 struct RootView: View {
     @ObservedObject var store: Store
     var body: some View {
         let open = store.expanded
         HStack(alignment: .center, spacing: 6) {
-            if !open, let t = store.toast { ToastBubble(toast: t) }
+            if !open, let t = store.toast {
+                ToastBubble(toast: t)
+            } else if !open, let id = store.hoveredSid, let s = store.sessions.first(where: { $0.sid == id }) {
+                BubbleLabel(s: s, name: store.displayName(s))
+            }
             ZStack(alignment: .leading) {
                 if open {
                     CardContent(store: store).transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .trailing)))
@@ -1020,8 +1478,17 @@ struct RootView: View {
                 Color.clear.preference(key: RectKey.self, value: g.frame(in: .named("window")))
             })
             .contextMenu {
+                Button(open ? "Close" : "Open notch") { store.expanded.toggle() }
                 Button("Switch agent now\(store.hotkeyEnabled ? "  \(store.hotkey.display)" : "")") { store.switchLatest() }
                     .disabled(store.live.isEmpty)
+                Menu("Switch to") {
+                    ForEach(store.switchTargets) { s in
+                        Button(s.name) { store.switchLatest(to: s.id) }
+                    }
+                }
+                .disabled(store.live.isEmpty || store.switchTargets.isEmpty)
+                Button("Cancel switch\(store.cancelHotkeyEnabled ? "  \(store.cancelHotkey.display)" : "")") { store.cancelLatestTakeover() }
+                    .disabled(store.takeovers.isEmpty)
                 Button("Settings…") { AppDelegate.shared?.showSettings() }
                 Button("Refresh agents") { store.refreshAgents() }
                 Button("Hide for 1 hour") { AppDelegate.shared?.hide(for: 3600) }
@@ -1034,19 +1501,63 @@ struct RootView: View {
         .frame(width: windowSize.width, height: windowSize.height, alignment: .trailing)
         .coordinateSpace(name: "window")
         .onPreferenceChange(RectKey.self) { store.shapeRect = $0 }
+        .onPreferenceChange(ClickRectsKey.self) { store.clickRects = $0 }
     }
 }
 
 struct RectKey: PreferenceKey {
     static var defaultValue: CGRect = .zero
-    static func reduce(value: inout CGRect, nextValue: () -> CGRect) { value = nextValue() }
+    /// Views that report nothing still pass through here with the empty default. Keeping that would
+    /// leave the notch with no outline, and every click would fall through to the app behind it.
+    static func reduce(value: inout CGRect, nextValue: () -> CGRect) {
+        let next = nextValue()
+        if next != .zero { value = next }
+    }
+}
+
+/// Where each clickable bubble and row is. Clicks are resolved from these in `NotchPanel`, because
+/// the panel never becomes key and must not eat the first click.
+struct ClickRectsKey: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+extension View {
+    func reportClickRect(_ sid: String) -> some View {
+        background(GeometryReader { g in
+            Color.clear.preference(key: ClickRectsKey.self, value: [sid: g.frame(in: .named("window"))])
+        })
+    }
 }
 
 // MARK: - Settings (takeover order)
 
+/// Settings window: the order, the hotkey, the accounts.
+struct SettingsView: View {
+    @ObservedObject var store: Store
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Takeover order").font(.system(size: 13, weight: .semibold))
+            Text("When an account hits its limit, nowall continues with the next checked one. Drag to reorder.")
+                .font(.system(size: 11)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            OrderList(store: store)
+
+            Divider().padding(.vertical, 4)
+            HotkeySection(store: store)
+
+            Divider().padding(.vertical, 4)
+            AccountsSection(store: store)
+        }
+        .padding(16)
+        .frame(width: 440)
+    }
+}
+
 /// The priority queue: every account, draggable, with a checkbox for "use this one".
 /// Saving writes `order` in config.json; nowall and the notch pick it up within a minute.
-struct SettingsView: View {
+struct OrderList: View {
     @ObservedObject var store: Store
     /// Until the user edits, the list mirrors the store; after that, their edits (saved on every change).
     @State private var edited: [Slot]?
@@ -1076,10 +1587,6 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Takeover order").font(.system(size: 13, weight: .semibold))
-            Text("When an account hits its limit, nowall continues with the next checked one. Drag to reorder.")
-                .font(.system(size: 11)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 2) {
                 if rows.isEmpty {
                     Text("No agents detected yet. Run: nowall setup").font(.system(size: 11)).foregroundColor(.secondary).padding(12)
@@ -1093,15 +1600,6 @@ struct SettingsView: View {
             .padding(4)
             .frame(maxWidth: .infinity)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-
-            Divider().padding(.vertical, 4)
-            HotkeySection(store: store)
-
-            Divider().padding(.vertical, 4)
-            AccountsSection(store: store)
-        }
-        .padding(16)
-        .frame(width: 440)
     }
 
     func row(_ i: Int, _ s: Slot) -> some View {
@@ -1111,6 +1609,7 @@ struct SettingsView: View {
                 set: { on in
                     var inc = included
                     if on { inc.insert(s.id) } else { inc.remove(s.id) }
+                    guard !inc.isEmpty else { return } // an empty order would turn every takeover off silently
                     editedIncluded = inc
                     save()
                 }
@@ -1119,7 +1618,7 @@ struct SettingsView: View {
             Image(systemName: brand(s.agent).symbol).foregroundColor(brand(s.agent).color).frame(width: 16)
             VStack(alignment: .leading, spacing: 1) {
                 Text(s.name).font(.system(size: 12, weight: .medium))
-                Text(slotLine(s, now: store.now)).font(.system(size: 10)).foregroundColor(s.signedIn == .no ? .orange : .secondary)
+                Text(slotLine(s, now: store.now)).font(.system(size: 10)).foregroundColor(slotWarns(s) ? .orange : .secondary)
             }
             Spacer()
             Button { move(i, by: -1) } label: { Image(systemName: "chevron.up") }
@@ -1148,28 +1647,103 @@ struct SettingsView: View {
     }
 }
 
-/// The handoff hotkey: on/off (written as `hotkey` in config.json) and the current combo.
+/// The handoff hotkey: on/off and the current combo, with a recorder.
 struct HotkeySection: View {
     @ObservedObject var store: Store
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Switch by hotkey").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Toggle("", isOn: Binding(get: { store.hotkeyEnabled }, set: { store.saveHotkey(enabled: $0) }))
                     .labelsHidden().toggleStyle(.switch).controlSize(.small)
             }
-            HStack(alignment: .top, spacing: 8) {
-                Text(store.hotkey.display)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .padding(.horizontal, 8).padding(.vertical, 3)
-                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(nsColor: .controlBackgroundColor)))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.35)))
-                    .opacity(store.hotkeyEnabled ? 1 : 0.5)
-                Text("Hands the session running right now to the next account (same as nowall switch). Works from any app; no Accessibility permission needed. Another key: set \"hotkey\": \"ctrl+alt+cmd+n\" in config.json.")
+            HStack(alignment: .top, spacing: 10) {
+                switchRecorder(store: store).opacity(store.hotkeyEnabled ? 1 : 0.5).disabled(!store.hotkeyEnabled)
+                Text("Hands the session running right now to the next account. Works from any app, with no permissions to grant. Click the shortcut to change it.")
+                    .font(.system(size: 11)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Text("Cancel by hotkey").font(.system(size: 13, weight: .semibold))
+                Spacer()
+                Toggle("", isOn: Binding(get: { store.cancelHotkeyEnabled }, set: { store.saveCancelHotkey(enabled: $0) }))
+                    .labelsHidden().toggleStyle(.switch).controlSize(.small)
+            }
+            .padding(.top, 4)
+            HStack(alignment: .top, spacing: 10) {
+                cancelRecorder(store: store).opacity(store.cancelHotkeyEnabled ? 1 : 0.5).disabled(!store.cancelHotkeyEnabled)
+                Text("Stops a switch that's running. Its edits stay in your files.")
                     .font(.system(size: 11)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+}
+
+func switchRecorder(store: Store) -> HotkeyRecorder {
+    HotkeyRecorder(store: store, current: { store.hotkey }, other: { store.cancelHotkey }) { store.saveHotkey(combo: $0) }
+}
+
+func cancelRecorder(store: Store) -> HotkeyRecorder {
+    HotkeyRecorder(store: store, current: { store.cancelHotkey }, other: { store.hotkey }) { store.saveCancelHotkey(combo: $0) }
+}
+
+/// Shows a shortcut; click it and press a new one. Esc cancels.
+struct HotkeyRecorder: View {
+    @ObservedObject var store: Store
+    let current: () -> HotKeyCombo
+    let other: () -> HotKeyCombo
+    let save: (HotKeyCombo) -> Void
+    @State private var recording = false
+    @State private var monitor: Any?
+    @State private var problem: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button { recording ? stop() : start() } label: {
+                Text(recording ? "Press keys…" : current().display)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .frame(minWidth: 72)
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(recording ? Color.accentColor.opacity(0.25) : Color(nsColor: .controlBackgroundColor)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(recording ? Color.accentColor : Color.secondary.opacity(0.35)))
+            }
+            .buttonStyle(.plain)
+            if let problem {
+                Text(problem).font(.system(size: 10)).foregroundColor(.orange).frame(maxWidth: 140, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onDisappear { stop() }
+    }
+
+    func start() {
+        problem = nil
+        recording = true
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            if e.keyCode == UInt16(kVK_Escape) { stop(); return nil }
+            guard let combo = HotKeyCombo.from(keyCode: e.keyCode, flags: e.modifierFlags) else {
+                problem = "Use a letter, number or F key with at least one of ⌃ ⌥ ⇧ ⌘."
+                return nil
+            }
+            stop()
+            // Ask macOS before saving: a combo another app holds would just never fire.
+            if combo == other() {
+                problem = "\(combo.display) is your other nowall hotkey."
+                return nil
+            }
+            if combo != current(), !HotKey.isFree(combo) {
+                problem = "\(combo.display) is taken by another app."
+                return nil
+            }
+            save(combo)
+            return nil
+        }
+    }
+
+    func stop() {
+        recording = false
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
     }
 }
 
@@ -1197,13 +1771,8 @@ struct AccountsSection: View {
             .frame(maxWidth: .infinity)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
 
-            Text("Add or remove one from a terminal:").font(.system(size: 11)).foregroundColor(.secondary).padding(.top, 2)
-            VStack(spacing: 4) {
-                command("nowall account add claude work", "a second Claude Code login (opens its sign-in)")
-                command("nowall account add codex work", "a second Codex login")
-                command("nowall account add cursor team --api-key", "a second Cursor account, by API key")
-                command("nowall account remove <id>", "forget an account, e.g. claude:work")
-            }
+            AddAccountForm(store: store).padding(.top, 4)
+            command("nowall account remove <id>", "forget an account, e.g. claude:work")
         }
     }
 
@@ -1264,9 +1833,48 @@ struct AccountsSection: View {
 
 // MARK: - Window
 
+/// Tells a double-click from two separate clicks. It times the presses itself as well as reading
+/// the system's click count, so a double-click still counts if the count doesn't reach this panel.
+struct ClickTracker {
+    let interval: TimeInterval
+    var slop: CGFloat = 8
+    private var last: (time: TimeInterval, at: CGPoint)?
+
+    init(interval: TimeInterval) { self.interval = interval }
+
+    /// True when this press completes a double-click.
+    mutating func press(at: CGPoint, time: TimeInterval, count: Int) -> Bool {
+        let near = last.map { time - $0.time <= interval && hypot(at.x - $0.at.x, at.y - $0.at.y) <= slop } ?? false
+        let double = count == 2 || near
+        last = double ? nil : (time, at)
+        return double
+    }
+}
+
+/// Appends to `notch-debug.log` in nowall's folder, only if that file already exists.
+/// `touch ~/.config/nowall/notch-debug.log` and restart the notch to diagnose clicks.
+enum DebugLog {
+    private static var handle: FileHandle?
+    static func start(home: URL) {
+        handle = try? FileHandle(forWritingTo: home.appendingPathComponent("notch-debug.log"))
+        _ = try? handle?.seekToEnd()
+    }
+    static func write(_ line: String) {
+        guard let handle else { return }
+        try? handle.write(contentsOf: Data("\(ISO8601DateFormatter().string(from: Date())) \(line)\n".utf8))
+    }
+}
+
 final class NotchPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+
+    /// Clicks are read here rather than through SwiftUI gestures, because this panel is never key
+    /// and every view inside it, circles included, has to count towards a double-click.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .leftMouseUp { AppDelegate.shared?.handleClick(event) }
+        super.sendEvent(event)
+    }
 }
 
 /// System-wide hotkey through Carbon. Unlike NSEvent global monitors this needs no Accessibility or
@@ -1274,14 +1882,22 @@ final class NotchPanel: NSPanel {
 final class HotKey {
     private var ref: EventHotKeyRef?
     private var handler: EventHandlerRef?
+    private let id: UInt32
     var action: (() -> Void)?
 
-    init() {
+    /// `id` tells this hotkey from the app's others: every press reaches every handler.
+    init(id: UInt32) {
+        self.id = id
         var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let me = Unmanaged.passUnretained(self).toOpaque()
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
-            guard let userData else { return noErr }
-            Unmanaged<HotKey>.fromOpaque(userData).takeUnretainedValue().action?()
+        InstallEventHandler(GetApplicationEventTarget(), { _, event, userData in
+            guard let userData, let event else { return OSStatus(eventNotHandledErr) }
+            var pressed = EventHotKeyID()
+            let read = GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                         nil, MemoryLayout<EventHotKeyID>.size, nil, &pressed)
+            let hotkey = Unmanaged<HotKey>.fromOpaque(userData).takeUnretainedValue()
+            guard read == noErr, pressed.id == hotkey.id else { return OSStatus(eventNotHandledErr) }
+            hotkey.action?()
             return noErr
         }, 1, &spec, me, &handler)
     }
@@ -1291,8 +1907,17 @@ final class HotKey {
     func register(_ combo: HotKeyCombo?) -> OSStatus {
         if let ref { UnregisterEventHotKey(ref); self.ref = nil }
         guard let combo else { return noErr }
-        let id = EventHotKeyID(signature: 0x4E57_414C /* 'NWAL' */, id: 1)
-        return RegisterEventHotKey(combo.keyCode, combo.modifiers, id, GetApplicationEventTarget(), 0, &ref)
+        let hotKeyID = EventHotKeyID(signature: 0x4E57_414C /* 'NWAL' */, id: id)
+        return RegisterEventHotKey(combo.keyCode, combo.modifiers, hotKeyID, GetApplicationEventTarget(), 0, &ref)
+    }
+
+    /// True when macOS would give us this combo. Uses its own id, so our live one doesn't collide.
+    static func isFree(_ combo: HotKeyCombo) -> Bool {
+        var probe: EventHotKeyRef?
+        let probeID = EventHotKeyID(signature: 0x4E57_414C, id: 99)
+        let status = RegisterEventHotKey(combo.keyCode, combo.modifiers, probeID, GetApplicationEventTarget(), 0, &probe)
+        if let probe { UnregisterEventHotKey(probe) }
+        return status == noErr
     }
 
     deinit { register(nil); if let handler { RemoveEventHandler(handler) } }
@@ -1304,8 +1929,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var store: Store!
     var settings: NSWindow?
     private var hotkey: HotKey?
+    private var cancelHotkey: HotKey?
     private var mouseTimer: Timer?
     private var outsideSince: Date?
+    private var pressed: String?
+    private var clicks = ClickTracker(interval: NSEvent.doubleClickInterval)
+    private var pendingOpen: DispatchWorkItem?
+    private var wasInside = false
+    /// How long a click on a bubble waits for a second click before opening its chat.
+    static let openDelay = min(NSEvent.doubleClickInterval, 0.3)
 
     func applicationDidFinishLaunching(_ note: Notification) {
         AppDelegate.shared = self
@@ -1316,6 +1948,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let homePath = arg("--home") ?? ProcessInfo.processInfo.environment["NOWALL_HOME"]
             ?? (NSHomeDirectory() as NSString).appendingPathComponent(".config/nowall")
+        if let screen = NSScreen.screens.first { windowSize.height = min(screen.visibleFrame.height, 880) }
+        DebugLog.start(home: URL(fileURLWithPath: homePath))
         store = Store(home: URL(fileURLWithPath: homePath), node: arg("--node"), cli: arg("--cli"))
         store.onHotkeyChange = { [weak self] in self?.registerHotkey() }
         registerHotkey()
@@ -1337,14 +1971,121 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.orderFrontRegardless()
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification,
                                                object: nil, queue: .main) { [weak self] _ in self?.place() }
+        if args.contains("--click-test") {
+            panel.alphaValue = 0
+            panel.ignoresMouseEvents = false
+            // From a timer, not the main queue: the test waits for work queued there.
+            Timer.scheduledTimer(withTimeInterval: 0.6, repeats: false) { [weak self] _ in self?.runClickTest() }
+            return
+        }
         mouseTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in self?.trackMouse() }
         if args.contains("--open-settings") { showSettings() }
+    }
+
+    /// `--click-test`: real mouse events through the real panel, with no window on screen and no
+    /// chat opened. Exits 0 when every click does what it should.
+    private func runClickTest() {
+        var opened: [String] = []
+        store.onOpenChat = { opened.append($0) }
+        var failures: [String] = []
+        func check(_ name: String, _ ok: Bool) { if !ok { failures.append(name) } }
+
+        var clock: TimeInterval = 1000
+        func send(_ type: NSEvent.EventType, _ p: CGPoint, count: Int) {
+            let e = NSEvent.mouseEvent(with: type, location: NSPoint(x: p.x, y: panel.frame.height - p.y),
+                                       modifierFlags: [], timestamp: clock, windowNumber: panel.windowNumber,
+                                       context: nil, eventNumber: 0, clickCount: count, pressure: 1)!
+            panel.sendEvent(e)
+        }
+        func click(_ p: CGPoint, count: Int = 1) { send(.leftMouseDown, p, count: count); send(.leftMouseUp, p, count: count) }
+        func double(_ p: CGPoint, counted: Bool) {
+            click(p); clock += 0.15
+            click(p, count: counted ? 2 : 1); clock += 5
+        }
+        func settle(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+
+        let shape = store.shapeRect
+        guard let bubble = store.clickRects.first else {
+            fputs("click test: no bubble on the tab (needs a live session in --home)\n", stderr)
+            exit(1)
+        }
+        let bubbleAt = CGPoint(x: bubble.value.midX, y: bubble.value.midY)
+        // Low on the tab: where the account circles are, away from any session bubble.
+        let circle = CGPoint(x: shape.midX, y: shape.maxY - 24)
+        check("the circle isn't a bubble", !store.clickRects.values.contains { $0.contains(circle) })
+
+        double(circle, counted: true)
+        check("double-click on a circle opens the card", store.expanded)
+        settle(0.5)
+        double(CGPoint(x: store.shapeRect.minX + 12, y: store.shapeRect.minY + 16), counted: true)
+        check("double-click on the card closes it", !store.expanded)
+        settle(0.5)
+
+        double(circle, counted: false)
+        check("a double-click counts even when the system says one click", store.expanded)
+        store.expanded = false
+        settle(0.5)
+
+        click(circle); clock += 2
+        click(circle); clock += 5
+        check("two slow clicks aren't a double-click", !store.expanded)
+
+        double(bubbleAt, counted: true)
+        check("double-click on a bubble opens the card", store.expanded)
+        settle(AppDelegate.openDelay + 0.2)
+        check("double-click on a bubble doesn't open its chat", opened.isEmpty)
+        store.expanded = false
+        settle(0.5)
+
+        click(bubbleAt); clock += 5
+        check("one click doesn't open the chat before the wait", opened.isEmpty)
+        settle(AppDelegate.openDelay + 0.2)
+        check("one click on a bubble opens its chat", opened == [bubble.key])
+        check("one click on a bubble leaves the card shut", !store.expanded)
+
+        // The cancel button stops the takeover, and doesn't open that session's chat.
+        var cancelled: [String] = []
+        store.onCancel = { cancelled.append($0) }
+        opened = []
+        store.expanded = true
+        settle(0.5)
+        if let stop = store.clickRects.first(where: { $0.key.hasPrefix(stopPrefix) }) {
+            click(CGPoint(x: stop.value.midX, y: stop.value.midY)); clock += 5
+            settle(AppDelegate.openDelay + 0.2)
+            check("the cancel button cancels that takeover", cancelled == [String(stop.key.dropFirst(stopPrefix.count))])
+            check("the cancel button doesn't open the chat", opened.isEmpty)
+        } else {
+            check("a running takeover shows a cancel button", false)
+        }
+
+        // Each hotkey runs only its own action: Carbon hands every press to every handler.
+        var pressed: [String] = []
+        hotkey?.action = { pressed.append("switch") }
+        cancelHotkey?.action = { pressed.append("cancel") }
+        func press(_ id: UInt32) {
+            var event: EventRef?
+            CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), 0, 0, &event)
+            guard let event else { return }
+            var hotKeyID = EventHotKeyID(signature: 0x4E57_414C, id: id)
+            SetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                              MemoryLayout<EventHotKeyID>.size, &hotKeyID)
+            SendEventToEventTarget(event, GetApplicationEventTarget())
+            ReleaseEvent(event)
+        }
+        press(3)
+        check("the cancel hotkey runs only cancel", pressed == ["cancel"])
+        press(1)
+        check("the switch hotkey runs only switch", pressed == ["cancel", "switch"])
+
+        for f in failures { fputs("click test failed: \(f)\n", stderr) }
+        exit(failures.isEmpty ? 0 : 1)
     }
 
     /// (Re)registers the global hotkey from the store's current setting. Logged to stderr so
     /// `nowall notch status` / the launchd log can show whether it took.
     func registerHotkey() {
-        if hotkey == nil { hotkey = HotKey() }
+        registerCancelHotkey()
+        if hotkey == nil { hotkey = HotKey(id: 1) }
         hotkey?.action = { [weak self] in
             fputs("notch: hotkey pressed → nowall switch\n", stderr)
             self?.store.switchLatest()
@@ -1362,12 +2103,75 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func registerCancelHotkey() {
+        if cancelHotkey == nil { cancelHotkey = HotKey(id: 3) }
+        cancelHotkey?.action = { [weak self] in
+            fputs("notch: cancel hotkey pressed → nowall cancel\n", stderr)
+            self?.store.cancelLatestTakeover()
+        }
+        let combo: HotKeyCombo? = store.cancelHotkeyEnabled ? store.cancelHotkey : nil
+        let status = cancelHotkey?.register(combo) ?? noErr
+        guard let combo else { return }
+        if status == noErr {
+            fputs("notch: cancel hotkey \(combo.display) registered\n", stderr)
+        } else {
+            fputs("notch: cancel hotkey \(combo.display) not registered (OSStatus \(status))\n", stderr)
+            store.show("Hotkey \(combo.display) is taken by another app", tone: "warn", seconds: 6)
+        }
+    }
+
     /// Right edge of the main screen, vertically centered.
     func place() {
         guard let screen = NSScreen.screens.first else { return }
         let vf = screen.visibleFrame
         panel.setFrame(NSRect(x: vf.maxX - windowSize.width, y: vf.midY - windowSize.height / 2,
                               width: windowSize.width, height: windowSize.height), display: true)
+    }
+
+    /// What's under a point. A cancel button sits inside its row, so it wins.
+    private func clickTarget(_ at: CGPoint) -> String? {
+        let hits = store.clickRects.filter { $0.value.contains(at) }.keys
+        return hits.first { $0.hasPrefix(stopPrefix) } ?? hits.first
+    }
+
+    /// A double-click anywhere on the notch, circles and bubbles included, opens or closes the card.
+    /// One click on a bubble opens that chat, after a short wait in case a second click follows. A
+    /// row in the open card has no double-click to wait for, so it opens at once.
+    func handleClick(_ event: NSEvent) {
+        let at = CGPoint(x: event.locationInWindow.x, y: panel.frame.height - event.locationInWindow.y)
+        let target = clickTarget(at)
+        if event.type == .leftMouseDown {
+            pressed = target
+            let slack: CGFloat = store.expanded ? 14 : 6
+            let onNotch = store.shapeRect.insetBy(dx: -slack, dy: -slack).contains(at)
+            let double = clicks.press(at: at, time: event.timestamp, count: event.clickCount)
+            DebugLog.write("press count=\(event.clickCount) double=\(double) onNotch=\(onNotch) bubble=\(target != nil) open=\(store.expanded)")
+            if double, onNotch {
+                pendingOpen?.cancel()
+                pendingOpen = nil
+                pressed = nil
+                store.expanded.toggle()
+                store.hoveredSid = nil
+            }
+            return
+        }
+        defer { pressed = nil }
+        guard let target, target == pressed else { return }
+        if target.hasPrefix(stopPrefix) {
+            store.cancelTakeover(String(target.dropFirst(stopPrefix.count)))
+            return
+        }
+        if store.expanded {
+            store.openChat(target)
+            return
+        }
+        pendingOpen?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.pendingOpen = nil
+            self?.store.openChat(target)
+        }
+        pendingOpen = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + AppDelegate.openDelay, execute: work)
     }
 
     /// Hover is computed from the mouse position, not SwiftUI hover, so it can't flicker.
@@ -1378,12 +2182,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let slack: CGFloat = store.expanded ? 14 : 6
         let inside = store.shapeRect.insetBy(dx: -slack, dy: -slack).contains(local)
         panel.ignoresMouseEvents = !inside
+        if inside != wasInside {
+            wasInside = inside
+            DebugLog.write(inside ? "mouse entered" : "mouse left")
+        }
+        let over = inside ? clickTarget(local).map { $0.hasPrefix(stopPrefix) ? String($0.dropFirst(stopPrefix.count)) : $0 } : nil
+        if over != store.hoveredSid { store.hoveredSid = over }
         if inside {
             outsideSince = nil
-            if !store.expanded { store.expanded = true }
         } else if store.expanded {
+            // The card stays while you're on it, and folds away shortly after you leave.
             if outsideSince == nil { outsideSince = Date() }
-            if let t = outsideSince, Date().timeIntervalSince(t) > 0.25 { store.expanded = false; outsideSince = nil }
+            if let t = outsideSince, Date().timeIntervalSince(t) > 0.6 { store.expanded = false; outsideSince = nil }
         }
     }
 
@@ -1414,6 +2224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// view offscreen at 2x (for docs and visual checks). `--now` pins the clock so countdowns are stable.
 @MainActor
 func snapshot(to path: String, expanded: Bool, settings: Bool, home: String, now: Date?, toast: String?) {
+    pinnedNow = now
     let store = Store(home: URL(fileURLWithPath: home), node: nil, cli: nil, fixedNow: now)
     store.expanded = expanded
     if let toast { store.show(toast, tone: "ok", seconds: 60) }
@@ -1440,6 +2251,41 @@ func snapshot(to path: String, expanded: Bool, settings: Bool, home: String, now
     do { try png.write(to: URL(fileURLWithPath: path)) } catch { fputs("snapshot: \(error)\n", stderr); exit(1) }
 }
 
+/// `--selftest`: the bubble rules, checked by `npm test` on a Mac.
+func selftest() -> Bool {
+    let working = 3, finished = 2, needs = 0
+    func all(_ pairs: [(String, Int)]) -> [(id: String, rank: Int)] { pairs.map { (id: $0.0, rank: $0.1) } }
+    var ok = true
+    func check(_ name: String, _ got: [String], _ want: [String]) {
+        if got != want { ok = false; fputs("selftest \(name): got \(got), want \(want)\n", stderr) }
+    }
+    // Three shown and two in the pile; one in the pile finishes: it swaps with one that's working.
+    check("swap", reconcileBubbles(shown: ["a", "b", "c"], all: all([("a", working), ("b", working), ("c", working), ("d", finished), ("e", working)]), capacity: 3), ["d", "b", "c"])
+    // After you click it, the one that was swapped out comes back.
+    check("back", reconcileBubbles(shown: ["d", "b", "c"], all: all([("a", working), ("b", working), ("c", working), ("e", working)]), capacity: 3), ["b", "c", "a"])
+    // Nothing moves while nothing needs you.
+    check("stable", reconcileBubbles(shown: ["c", "a"], all: all([("a", working), ("b", working), ("c", working)]), capacity: 2), ["c", "a"])
+    // A question outranks a finished chat, but two equals never swap.
+    check("question", reconcileBubbles(shown: ["a", "b"], all: all([("a", finished), ("b", finished), ("c", needs)]), capacity: 2), ["c", "b"])
+    check("equal", reconcileBubbles(shown: ["a", "b"], all: all([("a", finished), ("b", finished), ("c", finished)]), capacity: 2), ["a", "b"])
+    // Several finishing at once all surface, working ones giving way.
+    check("many", reconcileBubbles(shown: ["a", "b"], all: all([("a", working), ("b", working), ("c", finished), ("d", finished)]), capacity: 2), ["c", "d"])
+    // Gone sessions free their place.
+    check("gone", reconcileBubbles(shown: ["a", "z"], all: all([("a", working), ("b", working)]), capacity: 2), ["a", "b"])
+    // Double-clicks: the system's count, or two quick presses in one place.
+    func presses(_ list: [(TimeInterval, CGFloat, Int)]) -> [String] {
+        var t = ClickTracker(interval: 0.5)
+        return list.map { t.press(at: CGPoint(x: $0.1, y: 0), time: $0.0, count: $0.2) ? "double" : "single" }
+    }
+    check("counted", presses([(0, 0, 1), (0.2, 0, 2)]), ["single", "double"])
+    check("timed", presses([(0, 0, 1), (0.2, 0, 1)]), ["single", "double"])
+    check("slow", presses([(0, 0, 1), (0.9, 0, 1)]), ["single", "single"])
+    check("moved", presses([(0, 0, 1), (0.2, 40, 1)]), ["single", "single"])
+    check("cancel default parses", [HotKeyCombo.parse("ctrl+alt+cmd+x")?.keyCode.description ?? ""], [HotKeyCombo.cancelDefault.keyCode.description])
+    check("third press starts over", presses([(0, 0, 1), (0.2, 0, 2), (0.4, 0, 3)]), ["single", "double", "single"])
+    return ok
+}
+
 @main
 struct NowallNotchMain {
     static func main() {
@@ -1447,6 +2293,24 @@ struct NowallNotchMain {
         func arg(_ name: String) -> String? {
             guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
             return args[i + 1]
+        }
+        if args.contains("--selftest") { exit(selftest() ? 0 : 1) }
+        if let command = arg("--terminal-script") {
+            print(terminalScript(command, node: arg("--node"), cli: arg("--cli"), home: arg("--home") ?? "", shellPath: arg("--shell-path")), terminator: "")
+            exit(0)
+        }
+        if let out = arg("--snapshot"), let step = arg("--setup-step").flatMap(Int.init) {
+            let home = arg("--home") ?? (NSHomeDirectory() as NSString).appendingPathComponent(".config/nowall")
+            MainActor.assumeIsolated { snapshotSetup(to: out, step: step, home: home) }
+            exit(0)
+        }
+        if args.contains("--setup") {
+            let app = NSApplication.shared
+            app.setActivationPolicy(.regular)
+            let delegate = SetupDelegate()
+            app.delegate = delegate
+            withExtendedLifetime(delegate) { app.run() }
+            return
         }
         if let out = arg("--snapshot") {
             let home = arg("--home") ?? (NSHomeDirectory() as NSString).appendingPathComponent(".config/nowall")
@@ -1462,6 +2326,6 @@ struct NowallNotchMain {
         app.setActivationPolicy(.accessory) // no Dock icon, never steals focus
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.run()
+        withExtendedLifetime(delegate) { app.run() }
     }
 }

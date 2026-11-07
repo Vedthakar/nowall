@@ -2,7 +2,7 @@
 # Renders the README's notch images from a synthetic nowall home under /tmp (never the real one).
 #   sh scripts/snapshots.sh [OUT_DIR]        default OUT_DIR: docs/images
 #   SNAP_NO_BUILD=1 sh scripts/snapshots.sh  skip the Swift build (use the app already in notch/build)
-# Writes notch-tab.png (collapsed), notch-card.png (hover card) and notch-settings.png, all at 2x.
+# Writes notch-tab.png (collapsed), notch-card.png (the open card) and notch-settings.png, all at 2x.
 # The clock is pinned (--now) so countdowns and "back in 1h 42m" render the same every run.
 set -eu
 cd "$(dirname "$0")/.."
@@ -107,8 +107,8 @@ EOF
 "$APP" --snapshot "$OUT/notch-card.png" --expanded --home "$TMP" --now "$NOW"
 "$APP" --snapshot "$OUT/notch-settings.png" --settings --home "$TMP" --now "$NOW"
 # Trim the empty canvas around the right-edge notch (2x pixels: height width, then y x offset).
-sips --cropToHeightWidth 460 240 --cropOffset 410 440 "$OUT/notch-tab.png" >/dev/null
-sips --cropToHeightWidth 1040 680 --cropOffset 120 0 "$OUT/notch-card.png" >/dev/null
+sips --cropToHeightWidth 460 240 --cropOffset 410 480 "$OUT/notch-tab.png" >/dev/null
+sips --cropToHeightWidth 1040 680 --cropOffset 120 40 "$OUT/notch-card.png" >/dev/null
 for f in notch-tab notch-card notch-settings; do
   size=$(wc -c < "$OUT/$f.png" | tr -d ' ')
   [ "$size" -gt 5000 ] || { echo "snapshots: $OUT/$f.png is only $size bytes"; exit 1; }

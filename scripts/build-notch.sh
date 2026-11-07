@@ -11,10 +11,11 @@ OUT=notch/build/NowallNotch.app
 mkdir -p "$OUT/Contents/MacOS" notch/build/tmp
 for arch in arm64 x86_64; do
   swiftc -O -swift-version 5 -parse-as-library -target "$arch-apple-macos13.0" \
-    notch/NowallNotch.swift -o "notch/build/tmp/NowallNotch-$arch"
+    notch/*.swift -o "notch/build/tmp/NowallNotch-$arch"
 done
 lipo -create notch/build/tmp/NowallNotch-arm64 notch/build/tmp/NowallNotch-x86_64 -output "$OUT/Contents/MacOS/NowallNotch"
-cat > "$OUT/Contents/Info.plist" <<'PLIST'
+VERSION=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' package.json | head -n 1)
+cat > "$OUT/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -23,7 +24,7 @@ cat > "$OUT/Contents/Info.plist" <<'PLIST'
   <key>CFBundleName</key><string>nowall</string>
   <key>CFBundleExecutable</key><string>NowallNotch</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
 </dict>

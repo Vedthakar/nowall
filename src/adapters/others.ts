@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { classifyLimit } from "../limits.js";
-import { HOOK_MARK, isOurs, mergeHooksFile, parseStreamJson } from "./common.js";
+import { isWindows } from "../proc.js";
+import { hookCommand, isOurs, mergeHooksFile, parseStreamJson } from "./common.js";
 import { type AgentAdapter, versionOf } from "./types.js";
 
 /** Generic limit wording for agents whose exact error text has not been captured yet. */
@@ -23,7 +24,9 @@ export const cursor: AgentAdapter = {
   id: "cursor",
   displayName: "Cursor",
   binary: "cursor-agent",
-  installHint: "curl https://cursor.com/install -fsS | bash",
+  installHint: isWindows
+    ? "irm 'https://cursor.com/install?win32=true' | iex"
+    : "curl https://cursor.com/install -fsS | bash",
   loginHint: "cursor-agent login",
   maturity: "beta",
 
@@ -98,7 +101,7 @@ function cursorHooks(existing: Record<string, unknown>, nowall: string): Record<
   for (const [event, ours] of Object.entries(CURSOR_EVENTS)) {
     hooks[event] = [
       ...(hooks[event] ?? []).filter((h) => !isOurs(h)),
-      { command: `${HOOK_MARK} ${nowall} hook ${ours} --agent cursor` },
+      { command: hookCommand(nowall, `hook ${ours} --agent cursor`) },
     ];
   }
   return { version: 1, ...existing, hooks };
@@ -108,7 +111,9 @@ export const antigravity: AgentAdapter = {
   id: "antigravity",
   displayName: "Antigravity",
   binary: "agy",
-  installHint: "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+  installHint: isWindows
+    ? "see https://antigravity.google for the Windows installer"
+    : "curl -fsSL https://antigravity.google/cli/install.sh | bash",
   loginHint: "agy  (sign in interactively once)",
   maturity: "beta",
 

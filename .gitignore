@@ -36,3 +36,6 @@ notch/build/
 
 # npm pack output
 *.tgz
+
+# Internal planning notes
+docs/superpowers/

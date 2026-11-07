@@ -1,10 +1,11 @@
 import { join } from "node:path";
 import { readTail } from "../fsafe.js";
 import { classifyLimit } from "../limits.js";
+import { isWindows } from "../proc.js";
 import type { LimitHit } from "../schemas.js";
 import {
-  HOOK_MARK,
   cmdHook,
+  hookCommand,
   isOurs,
   mergeHooksFile,
   parseStreamJson,
@@ -18,7 +19,9 @@ export const claude: AgentAdapter = {
   id: "claude",
   displayName: "Claude Code",
   binary: "claude",
-  installHint: "curl -fsSL https://claude.ai/install.sh | bash",
+  installHint: isWindows
+    ? "irm https://claude.ai/install.ps1 | iex"
+    : "curl -fsSL https://claude.ai/install.sh | bash",
   loginHint: "claude  (then /login)",
   maturity: "stable",
 
@@ -88,7 +91,7 @@ export const claude: AgentAdapter = {
 };
 
 function claudeHooks(existing: Record<string, unknown>, nowall: string): Record<string, unknown> {
-  const hook = (name: string) => `${HOOK_MARK} ${nowall} hook ${name} --agent claude`;
+  const hook = (name: string) => hookCommand(nowall, `hook ${name} --agent claude`);
   return withHooks(existing, {
     SessionStart: [cmdHook(hook("session-start"), undefined, 30)],
     UserPromptSubmit: [cmdHook(hook("prompt"), undefined, 10)],

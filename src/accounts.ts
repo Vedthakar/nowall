@@ -1,11 +1,13 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { homedir, userInfo } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { Writable } from "node:stream";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import type { Runner } from "./adapters/types.js";
 import { readJsonSafe, writeAtomic } from "./fsafe.js";
+import { isWindows, spawnSync } from "./proc.js";
 import { agentName } from "./prompt.js";
 import {
   AGENT_IDS,
@@ -22,7 +24,7 @@ import { configDir, loadConfig, loadState, saveConfig, saveState } from "./state
 /**
  * Accounts: one login per entry. The default account of an agent is the agent's own login
  * ("claude"); extra accounts ("claude:work") are separate logins the user did once in an isolated
- * profile, selected through the agent's own environment variable. nowall never reads an agent's
+ * profile, selected through the agent's own environment. nowall never reads an agent's
  * credentials; the only secret it keeps is a Cursor API key the user typed in on purpose.
  */
 
@@ -32,15 +34,31 @@ export const PROFILE_ENV: Partial<Record<AgentId, string>> = {
   codex: "CODEX_HOME",
 };
 
-/** Agents whose extra accounts are an API key passed in the environment. */
+/** Agents that can also take an API key instead of a website sign-in (`--api-key`). */
 export const KEY_ENV: Partial<Record<AgentId, string>> = {
   cursor: "CURSOR_API_KEY",
 };
 
+/**
+ * The Cursor CLI has no profile variable, and by default keeps its login in one Keychain item per
+ * computer. Its file store keeps the login in `auth.json` under its home folder instead, so a
+ * private home gives each account its own login and never touches the main one. The agent's git
+ * identity stays the person's own. The home folder comes first: it's where the login lives.
+ */
+function cursorProfileEnv(dir: string): Record<string, string> {
+  const gitConfig = join(homedir(), ".gitconfig");
+  return {
+    HOME: dir,
+    XDG_CONFIG_HOME: join(dir, ".config"), // where the file store looks on Linux
+    AGENT_CLI_CREDENTIAL_STORE: "file",
+    ...(existsSync(gitConfig) ? { GIT_CONFIG_GLOBAL: gitConfig } : {}),
+  };
+}
+
 /** The agent's own sign-in command, run inside a profile by `nowall account add|login`. */
 export function loginArgs(agent: AgentId): string[] | null {
   if (agent === "claude") return ["auth", "login"];
-  if (agent === "codex") return ["login"];
+  if (agent === "codex" || agent === "cursor") return ["login"];
   return null;
 }
 
@@ -161,8 +179,20 @@ function secretFile(id: AccountId): string {
   return join(configDir(), "secrets", id.replace(/[^A-Za-z0-9_-]/g, "_"));
 }
 
+/** Where an API key is kept, in words for the person adding it. */
+export function secretStoreName(): string {
+  if (secretStore() === "keychain") return "Keychain";
+  return isWindows ? "config folder (readable only by your user)" : "config folder (0600)";
+}
+
 /** `secrets/` is 0700 and every key file 0600, even if the directory already existed. */
 function fixSecretPerms(id: AccountId): void {
+  if (isWindows) {
+    // chmod does nothing here: the same promise is an access list with only this user on it.
+    const grant = `${userInfo().username}:F`;
+    spawnSync("icacls", [secretFile(id), "/inheritance:r", "/grant:r", grant], { stdio: "ignore" });
+    return;
+  }
   try {
     chmodSync(join(configDir(), "secrets"), 0o700);
     if ((statSync(secretFile(id)).mode & 0o777) !== 0o600) chmodSync(secretFile(id), 0o600);
@@ -238,14 +268,17 @@ export function deleteSecret(id: AccountId, store: "keychain" | "file"): void {
 /** Reads a secret from the terminal without echoing it; "" when there is no terminal. */
 export async function askHidden(question: string): Promise<string> {
   if (!process.stdin.isTTY) return "";
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: true });
-  const mute = rl as unknown as { _writeToOutput: (s: string) => void };
-  const original = mute._writeToOutput.bind(rl);
-  mute._writeToOutput = (s: string) => {
-    if (s.includes(question)) original(question);
-  };
+  // readline echoes what's typed to its output, so that output goes nowhere.
+  const nowhere = new Writable({ write: (_chunk, _encoding, done) => done() });
+  const rl = createInterface({ input: process.stdin, output: nowhere, terminal: true });
+  rl.on("SIGINT", () => {
+    rl.close();
+    process.stdout.write("\n");
+    process.exit(130);
+  });
+  process.stdout.write(question);
   try {
-    const answer = await rl.question(question);
+    const answer = await rl.question("");
     process.stdout.write("\n");
     return answer.trim();
   } finally {
@@ -282,8 +315,8 @@ export function forgetSignIn(ids: readonly AccountId[]): void {
 
 /**
  * A stable, non-secret fingerprint of the login behind an account, so two profiles signed in
- * to the same account can be noticed ("claude:work is the same login as claude"). Claude's
- * `auth status --json` reports the email; we keep only the first 16 hex chars of its sha256,
+ * to the same account can be noticed ("claude:work is the same login as claude"). Claude and
+ * Cursor report the email in their status; we keep only the first 16 hex chars of its sha256,
  * and nothing is written to disk. Other agents expose nothing comparable → null.
  */
 export async function accountIdentity(
@@ -292,6 +325,18 @@ export async function accountIdentity(
   account: Account,
   env: Record<string, string>,
 ): Promise<string | null> {
+  if (account.agent === "cursor") {
+    const r = await run(bin, ["status", "--format", "json"], 15_000, env);
+    try {
+      const s = JSON.parse(r.stdout) as { userInfo?: { email?: unknown } };
+      const email = s.userInfo?.email;
+      if (typeof email !== "string" || !email.trim()) return null;
+      const who = `cursor|email:${email.trim().toLowerCase()}`;
+      return createHash("sha256").update(who).digest("hex").slice(0, 16);
+    } catch {
+      return null;
+    }
+  }
   if (account.agent !== "claude") return null;
   const r = await run(bin, ["auth", "status", "--json"], 15_000, env);
   let s: { loggedIn?: boolean; email?: string; configDirectory?: string };
@@ -315,6 +360,14 @@ export async function accountIdentity(
 
 export function validLabel(label: string): boolean {
   return labelProblem(label) === null;
+}
+
+/** A label for someone who didn't choose one: the second account is "2", and so on. */
+export function nextLabel(agent: AgentId): string {
+  const config = loadConfig();
+  let n = 2;
+  while (findAccount(config, `${agent}:${n}`)) n += 1;
+  return String(n);
 }
 
 /** Turns an EACCES/EROFS from the config folder into one sentence the user can act on. */
@@ -355,16 +408,15 @@ export function addAccount(
   const account: Account = { id, agent, label };
   const profileVar = PROFILE_ENV[agent];
   const keyVar = KEY_ENV[agent];
-  if (profileVar) {
+  if (profileVar || (agent === "cursor" && opts.apiKey === undefined)) {
     const dir = profileDir(agent, label);
     try {
       mkdirSync(dir, { recursive: true, mode: 0o700 });
     } catch (err) {
       throw homeProblem(err, "a profile folder");
     }
-    account.env = { [profileVar]: dir };
-  } else if (keyVar) {
-    if (opts.apiKey === undefined) throw new Error(`${agentName(agent)} accounts need an API key`);
+    account.env = profileVar ? { [profileVar]: dir } : cursorProfileEnv(dir);
+  } else if (keyVar && opts.apiKey !== undefined) {
     const problem = apiKeyProblem(opts.apiKey);
     if (problem) throw new Error(problem);
     const saved = storeSecret(id, opts.apiKey.trim());
@@ -429,7 +481,7 @@ export function loginCommand(account: Account, bin?: string): string {
   const args = loginArgs(account.agent);
   if (!args) return `nowall account login ${account.id}`;
   const env = Object.entries(account.env ?? {})
-    .map(([k, v]) => `${k}=${v}`)
+    .map(([k, v]) => (isWindows ? `$env:${k}='${v}';` : `${k}=${v}`))
     .join(" ");
   return `${env ? `${env} ` : ""}${bin ?? ADAPTERS[account.agent].binary} ${args.join(" ")}`;
 }

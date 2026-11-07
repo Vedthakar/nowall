@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile } from "../proc.js";
 import type { AgentId, LimitHit } from "../schemas.js";
 
 export type AgentEvent =
@@ -73,5 +73,5 @@ export async function versionOf(
 ): Promise<string | null> {
   const r = await run(bin, ["--version"], undefined, env);
   if (r.code !== 0) return null;
-  return (r.stdout || r.stderr).trim().split("\n")[0]?.slice(0, 80) ?? "";
+  return (r.stdout || r.stderr).trim().split("\n")[0]?.trim().slice(0, 80) ?? "";
 }

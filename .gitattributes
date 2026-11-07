@@ -1,0 +1,2 @@
+# Keep LF on every OS: a Windows checkout would otherwise get CRLF and fail the formatter.
+* text=auto eol=lf

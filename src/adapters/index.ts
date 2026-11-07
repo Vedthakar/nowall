@@ -1,5 +1,6 @@
 import { constants, accessSync, realpathSync } from "node:fs";
 import { delimiter, join } from "node:path";
+import { findOnWindowsPath, isWindows } from "../proc.js";
 import type { AgentId } from "../schemas.js";
 import { loadConfig } from "../state.js";
 import { claude } from "./claude.js";
@@ -21,6 +22,10 @@ export function resolveBinary(name: string, self?: string): string | null {
     ...(process.env.PATH ?? "").split(delimiter),
     ...(loadConfig().path ?? "").split(delimiter),
   ];
+  if (isWindows) {
+    const found = findOnWindowsPath(name, dirs.join(delimiter));
+    return found && (!selfReal || safeReal(found) !== selfReal) ? found : null;
+  }
   for (const dir of new Set(dirs)) {
     if (!dir) continue;
     const candidate = join(dir, name);

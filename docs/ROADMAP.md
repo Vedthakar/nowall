@@ -1,6 +1,6 @@
 # Roadmap
 
-- **Notch for Windows and Linux.** The macOS notch is native SwiftUI. Windows and Linux need a tray app (Tauri is the likely choice, reading the same `~/.config/nowall/status` files).
+- **Notch for Windows and Linux.** The CLI and failover run on Windows; the notch doesn't yet. The macOS notch is native SwiftUI. Windows and Linux need a tray app (Tauri is the likely choice, reading the same `~/.config/nowall/status` files).
 - **Publish:** claim `nowall` on npm, make the repo public, and sign + notarize the notch app for downloads.
 - **Proactive handoff:** use Claude's 5h/weekly usage (statusline) to hand off at ~95% instead of at the wall.
 - **Return to Claude** automatically when its cooldown ends, for long tasks.

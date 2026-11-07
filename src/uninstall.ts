@@ -1,4 +1,3 @@
-import { spawn, spawnSync } from "node:child_process";
 import {
   type Stats,
   existsSync,
@@ -10,13 +9,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join, relative } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { deleteSecret } from "./accounts.js";
-import { isOurs } from "./adapters/common.js";
+import { isOurs, unwrapStatusLine } from "./adapters/common.js";
 import { readJsonSafe, writeAtomic } from "./fsafe.js";
 import { CHECKPOINT_PREFIX } from "./git.js";
 import { MARK_START, REPO_HOOK_FILES, rcFiles, removeRepoHooks, stripBlock } from "./init.js";
+import { spawn, spawnSync } from "./proc.js";
 import { type Account, accountAgent } from "./schemas.js";
 import { notchLabel, notchRunning, stopNotch, tempHomeProblem } from "./setup.js";
 import { configDir, loadConfig, saveConfig } from "./state.js";
@@ -38,7 +38,9 @@ import type { SessionStatus } from "./status.js";
  */
 
 export const REINSTALL_LINE =
-  "curl -fsSL https://raw.githubusercontent.com/Vedthakar/nowall/main/install.sh | sh";
+  process.platform === "win32"
+    ? "irm https://raw.githubusercontent.com/Vedthakar/nowall/main/install.ps1 | iex"
+    : "curl -fsSL https://raw.githubusercontent.com/Vedthakar/nowall/main/install.sh | sh";
 const NPM_UNINSTALL = "npm uninstall -g nowall";
 const USER_HOOK_FILES = [".claude/settings.json", ".codex/hooks.json", ".cursor/hooks.json"];
 const CLAUDE_MD_START = "<!-- nowall:start -->";
@@ -161,6 +163,7 @@ export function shellWords(line: string): string[] {
  * the status line is ours alone.
  */
 export function wrappedStatusCommand(command: string): string | null {
+  if (command.includes(" --then-b64 ")) return unwrapStatusLine(command) ?? null;
   const words = shellWords(command);
   const at = words.indexOf("--then");
   if (at < 0) return null;
@@ -463,7 +466,7 @@ function inventory(dataDir: string): Inventory {
   for (const a of config.accounts ?? []) {
     if (a.secret?.store === "keychain") inv.keychainAccounts.push(a);
     for (const dir of Object.values(a.env ?? {})) {
-      if (!dir.startsWith(`${dataDir}/`) && !inv.foreignProfiles.includes(dir)) {
+      if (!dir.startsWith(`${dataDir}${sep}`) && !inv.foreignProfiles.includes(dir)) {
         inv.foreignProfiles.push(dir);
       }
     }
@@ -539,10 +542,13 @@ export function npmInstalled(): boolean {
 
 /** The running CLI lives inside the package, so npm removes it a moment after we exit. */
 function scheduleNpmUninstall(): void {
-  const child = spawn("sh", ["-c", `sleep 1; exec ${NPM_UNINSTALL}`], {
-    detached: true,
-    stdio: "ignore",
-  });
+  const child =
+    process.platform === "win32"
+      ? spawn("cmd.exe", ["/d", "/c", `ping -n 2 127.0.0.1 >nul & ${NPM_UNINSTALL}`], {
+          detached: true,
+          stdio: "ignore",
+        })
+      : spawn("sh", ["-c", `sleep 1; exec ${NPM_UNINSTALL}`], { detached: true, stdio: "ignore" });
   child.unref();
 }
 
@@ -678,7 +684,7 @@ export async function runUninstallGlobal(
     const what = [
       inv.files.length ? `config (${inv.files.join(", ")})` : "",
       inv.profiles.length
-        ? `${inv.profiles.length} profile${inv.profiles.length === 1 ? "" : "s"} with their logins (${inv.profiles.map((p) => p.split("/").pop()).join(", ")})`
+        ? `${inv.profiles.length} profile${inv.profiles.length === 1 ? "" : "s"} with their logins (${inv.profiles.map((p) => basename(p)).join(", ")})`
         : "",
       inv.secretFiles.length
         ? `${inv.secretFiles.length} secret file${inv.secretFiles.length === 1 ? "" : "s"}`

@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
@@ -11,14 +10,28 @@ import {
   accountFromEnv,
   accountName,
   addAccount,
+  askHidden as askHiddenLine,
   profilePath,
   validLabel,
 } from "./accounts.js";
-import { isOurs, mergeHooksFile, unwrapStatusLine, withHooks } from "./adapters/common.js";
+import {
+  isOurs,
+  mergeHooksFile,
+  nowallInvocation,
+  unwrapStatusLine,
+  withHooks,
+} from "./adapters/common.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
-import { type AgentInfo, type AgentsSnapshot, claudeUsagePath, refreshAgents } from "./agents.js";
-import { shq, writeAtomic } from "./fsafe.js";
+import {
+  type AgentInfo,
+  type AgentsSnapshot,
+  claudeDesktopInstalled,
+  claudeUsagePath,
+  refreshAgents,
+} from "./agents.js";
+import { writeAtomic } from "./fsafe.js";
+import { gitBash, isWindows, spawnSync } from "./proc.js";
 import type { AgentId } from "./schemas.js";
 import { configDir, loadConfig, saveConfig } from "./state.js";
 import { shortTour, wantColor } from "./tour.js";
@@ -67,7 +80,7 @@ Setting up will:
     snapshots (refs/nowall/...). Your branches, index and files are never touched.
   • When an agent hits its limit, quietly continue in the next agent you're signed in to, with the
     same context. No pop-ups; progress shows in the notch. Undo any step with \`nowall undo\`.
-  • Start the nowall notch (macOS): a small black status pill at the top-right of your screen.
+  • Start the nowall notch (macOS): a small black tab on the right edge of your screen.
 nowall never reads, stores or sends your credentials. Undo all of this with: nowall uninstall --global`;
 
 export function packageRoot(): string {
@@ -97,8 +110,7 @@ function cliPath(): string {
 
 /** Hook command: plain `nowall` when it's on PATH, else the absolute node + script (quoted). */
 export function nowallCommand(): string {
-  if (resolveBinary("nowall")) return "nowall";
-  return `${shq(process.execPath)} ${shq(realpathSync(cliPath()))}`;
+  return nowallInvocation(Boolean(resolveBinary("nowall")), () => realpathSync(cliPath()));
 }
 
 /**
@@ -170,17 +182,8 @@ export class Prompter {
   /** Reads a secret: nothing is echoed, and the value is never logged. */
   async askHidden(question: string): Promise<string> {
     if (!this.interactive) return "";
-    const rl = this.open();
-    const mute = rl as unknown as { _writeToOutput?: (s: string) => void };
-    const original = mute._writeToOutput;
-    if (original) mute._writeToOutput = () => {};
-    process.stdout.write(question);
-    try {
-      return (await this.nextLine()).trim();
-    } finally {
-      if (original) mute._writeToOutput = original;
-      process.stdout.write("\n");
-    }
+    this.suspend(); // the hidden prompt needs the terminal to itself
+    return askHiddenLine(question);
   }
 
   /** Hands the terminal to a child process (an agent's login); questions reopen stdin afterwards. */
@@ -203,7 +206,7 @@ const xml = (s: string) =>
 
 /** True while a notch process is running (from launchd or opened directly). */
 export function notchRunning(): boolean {
-  if (noLaunchd() || tempHomeProblem()) return false;
+  if (process.platform !== "darwin" || noLaunchd() || tempHomeProblem()) return false;
   return spawnSync("pgrep", ["-f", notchPattern()], { stdio: "ignore" }).status === 0;
 }
 
@@ -233,7 +236,7 @@ export function tempHomeProblem(): string | null {
 export function startNotch(home = homedir()): string {
   if (noLaunchd()) return "Notch skipped (NOWALL_NO_LAUNCHD).";
   if (process.platform !== "darwin") {
-    return "The notch is macOS-only for now (Windows/Linux are on the roadmap).";
+    return "The notch is macOS-only for now, so `nowall status` and `nowall logs -f` show what's happening. Failover works the same without it.";
   }
   const app = notchApp();
   if (!app) return "Notch app not found in this build (it is built on macOS with Xcode tools).";
@@ -335,22 +338,15 @@ function describe(a: AgentInfo): string {
   return "found and ready";
 }
 
-function claudeDesktopApp(): boolean {
-  return (
-    existsSync("/Applications/Claude.app") ||
-    existsSync(join(homedir(), "Applications", "Claude.app"))
-  );
-}
-
 const PROFILE_LOGIN: Partial<Record<AgentId, string[]>> = {
   claude: ["auth", "login"],
   codex: ["login"],
+  cursor: ["login"],
 };
 
 /**
- * The accounts step of `setup`: for each installed agent, offer to add another login. Profile
- * agents (Claude, Codex) sign in right here, inside their new profile; Cursor takes an API key
- * (hidden prompt, never echoed or logged). Every question defaults to "no".
+ * The accounts step of `setup`: for each installed agent, offer to add another login, signed in
+ * right here inside its own new profile. Every question defaults to "no".
  */
 export async function accountWizard(p: Prompter, snap: AgentsSnapshot): Promise<number> {
   let added = 0;
@@ -360,15 +356,8 @@ export async function accountWizard(p: Prompter, snap: AgentsSnapshot): Promise<
     const bin = resolveBinary(ADAPTERS[agent].binary, process.argv[1]);
     if (!info?.installed || info.desktopOnly || !bin) continue;
     const name = ADAPTERS[agent].displayName;
-    const keyed = Boolean(KEY_ENV[agent]);
     let first = true;
-    while (
-      await p.yes(
-        `${first ? "Do you have another" : "Another"} ${name} account?${
-          first && keyed ? " It needs an API key." : ""
-        } [y/N] `,
-      )
-    ) {
+    while (await p.yes(`${first ? "Do you have another" : "Another"} ${name} account? [y/N] `)) {
       first = false;
       const label = await p.ask("Label for it (e.g. work): ");
       if (!validLabel(label)) {
@@ -376,47 +365,22 @@ export async function accountWizard(p: Prompter, snap: AgentsSnapshot): Promise<
         continue;
       }
       try {
-        if (keyed) {
-          out(
-            `Cursor keeps one login per computer, so a second Cursor account uses an API key.\nCreate one while signed in to that account at https://cursor.com/settings (API keys).\nnowall keeps it in your ${process.platform === "darwin" ? "Keychain" : "config folder (0600)"} and only passes it to cursor-agent.\n`,
-          );
-          const key = await p.askHidden("Paste the API key (hidden): ");
-          if (!key) {
-            out("No key given; skipped.\n");
-            continue;
-          }
-          const account = addAccount(agent, label, { apiKey: key });
-          added += 1;
-          const d = await ADAPTERS[agent].detect(
-            defaultRunner,
-            bin,
-            accountEnv(loadConfig(), account.id),
-          );
-          out(
-            d.signedIn === false
-              ? `✗ ${accountName(account.id)}: cursor-agent did not accept that key. Replace it with: nowall account remove ${account.id} && nowall account add cursor ${label} --api-key\n`
-              : `✓ ${accountName(account.id)} ready (key in ${account.secret?.store}).\n`,
-          );
-        } else {
-          const account = addAccount(agent, label);
-          added += 1;
-          const env = account.env ?? {};
-          const loginArgs = PROFILE_LOGIN[agent] ?? ["login"];
-          out(
-            `Sign in to ${accountName(account.id)} now. This login lives in ${profilePath(account)}, apart from your main one.\n\n`,
-          );
-          p.suspend(); // the login owns the terminal while it runs
-          spawnSync(bin, loginArgs, { stdio: "inherit", env: { ...process.env, ...env } });
-          const d = await ADAPTERS[agent].detect(defaultRunner, bin, env);
-          const finish = `${Object.entries(env)
-            .map(([k, v]) => `${k}=${shq(v)}`)
-            .join(" ")} ${ADAPTERS[agent].binary} ${loginArgs.join(" ")}`;
-          out(
-            d.signedIn === false
-              ? `\n✗ ${accountName(account.id)} is not signed in yet. Finish later with: ${finish}\n`
-              : `\n✓ ${accountName(account.id)} signed in.\n`,
-          );
-        }
+        const account = addAccount(agent, label);
+        added += 1;
+        const env = account.env ?? {};
+        const loginArgs = PROFILE_LOGIN[agent] ?? ["login"];
+        out(
+          `Sign in to ${accountName(account.id)} now. This login lives in ${profilePath(account)}, apart from your main one.\n\n`,
+        );
+        p.suspend(); // the login owns the terminal while it runs
+        spawnSync(bin, loginArgs, { stdio: "inherit", env: { ...process.env, ...env } });
+        const d = await ADAPTERS[agent].detect(defaultRunner, bin, env);
+        const finish = `nowall account login ${account.id}`;
+        out(
+          d.signedIn === false
+            ? `\n✗ ${accountName(account.id)} is not signed in yet. Finish later with: ${finish}\n`
+            : `\n✓ ${accountName(account.id)} signed in.\n`,
+        );
       } catch (err) {
         out(
           `Could not add ${name} (${label}): ${err instanceof Error ? err.message : String(err)}\n`,
@@ -429,12 +393,99 @@ export async function accountWizard(p: Prompter, snap: AgentsSnapshot): Promise<
 
 /** `nowall setup`: one command, no per-repo steps. Finds agents, installs hooks, starts the notch. */
 export async function runSetup(argv: string[]): Promise<number> {
+  if (argv.includes("--apply")) return applySetup(argv);
+  if (guiAvailable(argv)) {
+    const code = runSetupWindow(argv);
+    if (code !== null) return code;
+    process.stdout.write("The setup window couldn't open, so setup continues here.\n\n");
+  }
   const yes = argv.includes("--yes") || argv.includes("-y");
   const p = new Prompter(yes);
   try {
     return await setupFlow(argv, p);
   } finally {
     p.close();
+  }
+}
+
+/** The setup window needs a Mac, a desktop session, and someone at it. */
+function guiAvailable(argv: string[]): boolean {
+  if (process.platform !== "darwin" || noLaunchd() || !notchApp() || tempHomeProblem())
+    return false;
+  if (["--cli", "--yes", "-y", "--no-notch"].some((f) => argv.includes(f))) return false;
+  if (process.env.SSH_CONNECTION || process.env.CI) return false;
+  return argv.includes("--gui") || Boolean(process.stdin.isTTY);
+}
+
+/** Runs the setup window and waits for it. Null when it couldn't run at all. */
+function runSetupWindow(argv: string[]): number | null {
+  process.stdout.write("Opening the nowall setup window...\n");
+  const r = spawnSync(
+    notchApp() as string,
+    [
+      "--setup",
+      "--node",
+      process.execPath,
+      "--cli",
+      realpathSync(cliPath()),
+      "--home",
+      configDir(),
+      ...(argv.includes("--yolo") ? ["--yolo"] : []),
+    ],
+    { stdio: "ignore" },
+  );
+  if (r.status === 0) {
+    process.stdout.write("nowall is on. Double-click the notch on the right edge to open it.\n");
+    return 0;
+  }
+  if (r.status === 3) {
+    process.stdout.write("Setup cancelled. Nothing changed.\n");
+    return 1;
+  }
+  return null;
+}
+
+/** Hooks and config: the part of setup that needs no questions. */
+function installEverything(argv: string[], home: string): string[] {
+  const cmd = nowallCommand();
+  const written: string[] = [];
+  // Claude Code always (its desktop app uses ~/.claude too); others only if they're on this machine.
+  written.push(...(ADAPTERS.claude.installUserHooks?.(home, cmd) ?? []));
+  if (existsSync(join(home, ".codex")))
+    written.push(...(ADAPTERS.codex.installUserHooks?.(home, cmd) ?? []));
+  if (existsSync(join(home, ".cursor")))
+    written.push(...(ADAPTERS.cursor.installUserHooks?.(home, cmd) ?? []));
+
+  const config = loadConfig();
+  config.scope = "global";
+  if (config.takeover === "off") config.takeover = "background"; // setup means "turn it on"
+  config.path = process.env.PATH ?? config.path;
+  if (argv.includes("--yolo")) config.yolo = true;
+  saveConfig(config);
+  return written;
+}
+
+/** `nowall setup --apply`: what the setup window runs after you agree. Prints one JSON object. */
+async function applySetup(argv: string[]): Promise<number> {
+  const home = homedir();
+  const problem = tempHomeProblem();
+  if (problem && !argv.includes("--no-notch")) {
+    process.stdout.write(`${JSON.stringify({ ok: false, error: problem })}\n`);
+    return 1;
+  }
+  try {
+    const hooks = installEverything(argv, home);
+    await refreshAgents(undefined, undefined, { force: true });
+    const notch =
+      loadConfig().notch === false || argv.includes("--no-notch")
+        ? "Notch is off."
+        : startNotch(home);
+    process.stdout.write(`${JSON.stringify({ ok: true, hooks, notch })}\n`);
+    return 0;
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`${JSON.stringify({ ok: false, error })}\n`);
+    return 1;
   }
 }
 
@@ -452,21 +503,8 @@ async function setupFlow(argv: string[], p: Prompter): Promise<number> {
     return 1;
   }
 
-  const cmd = nowallCommand();
-  const written: string[] = [];
-  // Claude Code always (its desktop app uses ~/.claude too); others only if they're on this machine.
-  written.push(...(ADAPTERS.claude.installUserHooks?.(home, cmd) ?? []));
-  if (existsSync(join(home, ".codex")))
-    written.push(...(ADAPTERS.codex.installUserHooks?.(home, cmd) ?? []));
-  if (existsSync(join(home, ".cursor")))
-    written.push(...(ADAPTERS.cursor.installUserHooks?.(home, cmd) ?? []));
-
+  const written = installEverything(argv, home);
   const config = loadConfig();
-  config.scope = "global";
-  if (config.takeover === "off") config.takeover = "background"; // setup means "turn it on"
-  config.path = process.env.PATH ?? config.path;
-  if (argv.includes("--yolo")) config.yolo = true;
-  saveConfig(config);
 
   let snap = await refreshAgents();
   process.stdout.write("Found on this computer:\n");
@@ -474,9 +512,9 @@ async function setupFlow(argv: string[], p: Prompter): Promise<number> {
     process.stdout.write(`  ${a.name.padEnd(12)} ${describe(a)}\n`);
   }
   const claude = snap.agents.find((a) => a.id === "claude");
-  if (claudeDesktopApp()) {
+  if (claudeDesktopInstalled()) {
     process.stdout.write(
-      "  Claude desktop app: covered by the same hooks, nothing to switch on. Usage rings appear after any terminal `claude` turn.\n",
+      "  Claude desktop app: covered by the same hooks, nothing to switch on.\n",
     );
     if (claude?.desktopOnly) {
       process.stdout.write(
@@ -520,6 +558,11 @@ async function setupFlow(argv: string[], p: Prompter): Promise<number> {
   }
   for (const a of snap.agents.filter((x) => x.installed && x.signedIn === false)) {
     process.stdout.write(`To finish: run \`${a.loginHint}\` so ${a.name} can take over.\n`);
+  }
+  if (claude?.installed && !claude.desktopOnly && !claude.usage?.length) {
+    process.stdout.write(
+      "To see Claude's usage: run `claude` in a terminal and send one message. Claude only reports usage there, so its circle stays plain until you do.\n",
+    );
   }
   process.stdout.write(`\n${shortTour({ color })}`);
   return 0;
@@ -577,13 +620,24 @@ export function runStatusline(
     // never disturb Claude's UI
   }
   const at = argv.indexOf("--then");
-  const inner = at >= 0 ? argv[at + 1] : undefined;
+  const encoded = argv.indexOf("--then-b64");
+  const inner =
+    encoded >= 0
+      ? Buffer.from(argv[encoded + 1] ?? "", "base64").toString()
+      : at >= 0
+        ? argv[at + 1]
+        : undefined;
   if (!inner) return 0;
-  const r = spawnSync("/bin/sh", ["-c", inner], {
-    input: raw,
-    stdio: ["pipe", "inherit", "inherit"],
-    env,
-  });
+  const stdio: ["pipe", "inherit", "inherit"] = ["pipe", "inherit", "inherit"];
+  if (isWindows) {
+    // Claude runs a status line under Git Bash, so that's what the user's command was written for.
+    const bash = gitBash(env);
+    const r = bash
+      ? spawnSync(bash, ["-c", inner], { input: raw, stdio, env })
+      : spawnSync(inner, [], { input: raw, stdio, env, shell: true });
+    return r.status ?? 1;
+  }
+  const r = spawnSync("/bin/sh", ["-c", inner], { input: raw, stdio, env });
   return r.status ?? 1;
 }
 
@@ -595,6 +649,14 @@ export function runLogs(root: string, follow: boolean): number {
     return 0;
   }
   if (follow) {
+    if (isWindows) {
+      spawnSync(
+        "powershell.exe",
+        ["-NoProfile", "-Command", "Get-Content -LiteralPath $env:NOWALL_LOG -Tail 50 -Wait"],
+        { stdio: "inherit", env: { ...process.env, NOWALL_LOG: log } },
+      );
+      return 0;
+    }
     spawnSync("tail", ["-n", "50", "-f", log], { stdio: "inherit" });
     return 0;
   }

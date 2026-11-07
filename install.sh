@@ -40,6 +40,6 @@ if ! npm install -g "$src" >/dev/null; then
 fi
 
 say "Setting up..."
-nowall setup --yes
+nowall setup --gui
 
 say "Done. To add extra accounts later: nowall account add <agent> <label>. To remove nowall: nowall uninstall --global"

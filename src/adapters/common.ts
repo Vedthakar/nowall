@@ -1,5 +1,6 @@
 import { realpathSync } from "node:fs";
 import { readJsonSafe, shq, writeAtomic } from "../fsafe.js";
+import { isWindows } from "../proc.js";
 import type { AgentEvent } from "./types.js";
 
 type Json = Record<string, unknown>;
@@ -120,6 +121,30 @@ type HookGroup = {
 /** Prefix on every hook command we install (a no-op sh assignment) so we can always find ours. */
 export const HOOK_MARK = "NOWALL_HOOK=1";
 
+/**
+ * A hook's command line. On Windows the same line may run under Git Bash, PowerShell or cmd.exe,
+ * depending on the agent and on what is installed, so it has to mean the same thing in all three.
+ * `VAR=1 cmd` only works in sh, so there the mark is a trailing argument that nowall ignores.
+ */
+export function hookCommand(nowall: string, rest: string, windows = isWindows): string {
+  return windows ? `${nowall} ${rest} ${HOOK_MARK}` : `${HOOK_MARK} ${nowall} ${rest}`;
+}
+
+/**
+ * How a hook calls nowall. `.cmd` on Windows, because PowerShell would otherwise pick npm's `.ps1`
+ * shim, which the default execution policy blocks. Without a global install: bare `node` and a
+ * double-quoted path with forward slashes, the one spelling all three shells read the same way.
+ */
+export function nowallInvocation(
+  onPath: boolean,
+  script: () => string,
+  node = process.execPath,
+  windows = isWindows,
+): string {
+  if (windows) return onPath ? "nowall.cmd" : `node "${script().replace(/\\/g, "/")}"`;
+  return onPath ? "nowall" : `${shq(node)} ${shq(script())}`;
+}
+
 /** True for hook entries nowall installed, in any form we have ever written. */
 export function isOurs(entry: unknown): boolean {
   const text = JSON.stringify(entry);
@@ -130,13 +155,20 @@ export function isOurs(entry: unknown): boolean {
  * Claude's status-line tap. When the user already has a status line, ours runs first and then
  * hands the same JSON to theirs (`--then`), so they keep their display and get usage rings.
  */
-export function statusLineCommand(nowall: string, inner?: string): string {
+export function statusLineCommand(nowall: string, inner?: string, windows = isWindows): string {
+  if (windows) {
+    // No quoting survives bash, PowerShell and cmd.exe alike, so the user's command travels as base64.
+    const then = inner ? ` --then-b64 ${Buffer.from(inner).toString("base64")}` : "";
+    return hookCommand(nowall, `statusline${then}`, true);
+  }
   const base = `${HOOK_MARK} ${nowall} statusline`;
   return inner ? `${base} --then ${shq(inner)}` : base;
 }
 
 /** The user's own command wrapped by `statusLineCommand`, or undefined for a plain nowall tap. */
 export function unwrapStatusLine(command: string): string | undefined {
+  const encoded = / --then-b64 (\S+)/.exec(command)?.[1];
+  if (encoded) return Buffer.from(encoded, "base64").toString();
   const at = command.indexOf(" --then ");
   if (at < 0) return undefined;
   const quoted = command.slice(at + " --then ".length).trim();

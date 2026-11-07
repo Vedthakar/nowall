@@ -6,6 +6,7 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   renameSync,
   rmSync,
@@ -13,6 +14,7 @@ import {
   writeSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { spawn, spawnSync } from "./proc.js";
 
 /**
  * File I/O for anything nowall writes inside a repository the user may not fully trust.
@@ -31,6 +33,12 @@ const READ_FLAGS = constants.O_RDONLY | NOFOLLOW | NONBLOCK;
 /** Directory mode for a file we create: private (0700) when the file itself is private (0600). */
 const dirMode = (fileMode: number) => ((fileMode & 0o077) === 0 ? 0o700 : 0o755);
 
+/**
+ * Windows has no O_NOFOLLOW, so a link at the final path component has to be checked by hand. Not
+ * race-free the way the flag is, but a repo can no longer simply plant a link and have it followed.
+ */
+const plantedLink = (path: string) => NOFOLLOW === 0 && isSymlink(path);
+
 export function isSymlink(path: string): boolean {
   try {
     return lstatSync(path).isSymbolicLink();
@@ -39,8 +47,43 @@ export function isSymlink(path: string): boolean {
   }
 }
 
+const SF_DATALESS = 0x40000000;
+
+/**
+ * True when iCloud (or another file provider) evicted this file's contents. Touching the data of an
+ * evicted file blocks until it downloads, which can outlast a hook's timeout, so anything on the
+ * hook path checks first. Zero blocks is the cheap filter; only then do we ask for the real flag.
+ */
+export function isEvicted(path: string): boolean {
+  if (process.platform !== "darwin") return false;
+  try {
+    const st = statSync(path);
+    if (!st.isFile() || st.size === 0 || st.blocks !== 0) return false;
+    const r = spawnSync("/usr/bin/stat", ["-f", "%f", path], { encoding: "utf8", timeout: 2000 });
+    return (Number.parseInt(r.stdout ?? "", 10) & SF_DATALESS) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+/** Asks the file provider to download a path, without waiting for it. Best-effort. */
+export function hydrateInBackground(path: string): void {
+  try {
+    const child = spawn("/usr/bin/brctl", ["download", path], { detached: true, stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    // only a convenience: the next hook just checks again
+  }
+}
+
 /** Reads at most the last `maxBytes` of a regular file (tail), or null. */
 export function readTail(path: string, maxBytes: number): string | null {
+  if (isEvicted(path)) {
+    hydrateInBackground(path);
+    return null;
+  }
+  if (plantedLink(path)) return null;
   let fd: number;
   try {
     fd = openSync(path, READ_FLAGS);
@@ -63,6 +106,11 @@ export function readTail(path: string, maxBytes: number): string | null {
 
 /** Reads a whole small file; null if missing, not a regular file, a symlink, or over `maxBytes`. */
 export function readSmall(path: string, maxBytes = 1024 * 1024): string | null {
+  if (isEvicted(path)) {
+    hydrateInBackground(path);
+    return null;
+  }
+  if (plantedLink(path)) return null;
   let fd: number;
   try {
     fd = openSync(path, READ_FLAGS);
@@ -90,6 +138,23 @@ export function readJsonSafe<T>(path: string, maxBytes?: number): T | null {
   }
 }
 
+/**
+ * Rename that survives Windows' sharing rules: replacing a file another hook, or an antivirus scan,
+ * has open fails for a moment with EPERM, EACCES or EBUSY. Everywhere else it never fails that way.
+ */
+export function renameRetry(from: string, to: string, attempts = 12): void {
+  for (let i = 1; ; i++) {
+    try {
+      renameSync(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? "";
+      if (i >= attempts || !["EPERM", "EACCES", "EBUSY"].includes(code)) throw err;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * i);
+    }
+  }
+}
+
 /** Atomic write: exclusive temp file in the same directory, then rename over the target. */
 export function writeAtomic(path: string, text: string, mode = 0o600): void {
   mkdirSync(dirname(path), { recursive: true, mode: dirMode(mode) });
@@ -105,7 +170,7 @@ export function writeAtomic(path: string, text: string, mode = 0o600): void {
     closeSync(fd);
   }
   try {
-    renameSync(tmp, path);
+    renameRetry(tmp, path);
   } catch (err) {
     rmSync(tmp, { force: true });
     throw err;
@@ -115,7 +180,26 @@ export function writeAtomic(path: string, text: string, mode = 0o600): void {
 /** Appends without following a symlink at `path`. Rotates the file past `rotateBytes`. */
 export function appendSafe(path: string, text: string, rotateBytes = 5 * 1024 * 1024): void {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const spool = `${path}.spool`;
+  if (isEvicted(path)) {
+    // Appending would block on the download: park the line and let the next append merge it.
+    hydrateInBackground(path);
+    appendRaw(spool, text);
+    return;
+  }
   rotateIfLarge(path, rotateBytes);
+  let parked = "";
+  try {
+    parked = readFileSync(spool, "utf8");
+    rmSync(spool, { force: true });
+  } catch {
+    // nothing parked
+  }
+  appendRaw(path, parked + text);
+}
+
+function appendRaw(path: string, text: string): void {
+  if (plantedLink(path)) return;
   const fd = openSync(
     path,
     constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | NOFOLLOW,

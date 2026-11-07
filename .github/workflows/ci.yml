@@ -19,3 +19,24 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run build:notch
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:windows
+      # The real path a Windows user takes: pack, install.ps1 from that package, then use it.
+      - name: Install with install.ps1
+        shell: pwsh
+        run: |
+          $tgz = (npm pack --silent | Select-Object -Last 1)
+          $env:NOWALL_SOURCE = (Resolve-Path $tgz).Path
+          ./install.ps1
+          "$(npm prefix -g)" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - run: npm run smoke:windows

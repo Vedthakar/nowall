@@ -74,7 +74,7 @@ describe("redact: secret-named assignments", () => {
   it("leaves harmless lookalikes alone", () => {
     for (const s of [
       '"input_tokens": 123456',
-      "author: Ved Thakar",
+      "author: Jane Doe",
       "max_tokens=4096",
       "const tokenizer = new Tokenizer()",
       "the password field is required",

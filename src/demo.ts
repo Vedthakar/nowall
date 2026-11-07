@@ -1,8 +1,8 @@
-import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { execFileSync, spawnSync } from "./proc.js";
 
 const DONE = (titles: string[]) => ({
   v: 1,
@@ -10,6 +10,21 @@ const DONE = (titles: string[]) => ({
   updatedBy: "cursor",
   tasks: titles.map((title, i) => ({ id: String(i + 1), title, status: "done" })),
 });
+
+/** The Windows form of the demo's fake agents: a real npm-style `.cmd` shim and the script behind it. */
+function writeWindowsShim(bin: string, name: string, agent: string, fake: string): void {
+  writeFileSync(
+    join(bin, `${name}.mjs`),
+    `const a = process.argv[2];
+if (a === "--version") { console.log("simulated ${agent}"); process.exit(0); }
+if (a === "status") { console.log('{"isAuthenticated":true}'); process.exit(0); }
+if (a === "auth") { console.log('{"loggedIn":true}'); process.exit(0); }
+process.argv.splice(2, 0, ${JSON.stringify(agent)});
+await import(${JSON.stringify(pathToFileURL(fake).href)});
+`,
+  );
+  writeFileSync(join(bin, `${name}.cmd`), `@node "%~dp0\\${name}.mjs" %*\r\n`);
+}
 
 /**
  * `nowall demo`: a full, simulated Claude Code → Cursor failover in a throwaway repo.
@@ -43,6 +58,10 @@ export async function runDemo(): Promise<number> {
     ["claude", "claude"],
     ["cursor-agent", "cursor"],
   ] as const) {
+    if (process.platform === "win32") {
+      writeWindowsShim(bin, name, agent, fake);
+      continue;
+    }
     const shim = join(bin, name);
     writeFileSync(
       shim,
@@ -90,7 +109,7 @@ exec "${process.execPath}" "${fake}" ${agent} "$@"
   const { NOWALL_SID: _ignored, ...parentEnv } = process.env;
   const env: NodeJS.ProcessEnv = {
     ...parentEnv,
-    PATH: `${bin}:${process.env.PATH ?? ""}`,
+    PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
     NOWALL_HOME: home,
     FAKE_PLAN: plan,
     FAKE_NOWALL: `"${process.execPath}" "${cli}"`,

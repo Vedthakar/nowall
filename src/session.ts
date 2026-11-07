@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
   constants,
@@ -12,6 +11,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { appendSafe, readSmall, readTail } from "./fsafe.js";
+import { execFileSync } from "./proc.js";
 import { loadEnvValues, redact, redactDeep } from "./redact.js";
 import type { AccountId, AgentId, JournalLine, LimitWindow, TaskList } from "./schemas.js";
 import { isTaskList } from "./schemas.js";
@@ -189,6 +189,11 @@ export function remainingTasks(tasks: TaskList | null): number {
   return tasks ? tasks.tasks.filter((t) => t.status === "todo").length : Number.NaN;
 }
 
+/** Left by `nowall cancel` where signals don't exist (see `watchCancelFile`). */
+export function cancelPath(root: string): string {
+  return join(handoffDir(root), "cancel");
+}
+
 function lockPath(root: string): string {
   return join(handoffDir(root), "active.lock");
 }
@@ -201,6 +206,12 @@ function pidAlive(pid: number): boolean {
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/** The live process supervising this repo, if any. */
+export function lockHolder(root: string): number | null {
+  const pid = Number(readSmall(lockPath(root), 64)?.trim());
+  return pidAlive(pid) ? pid : null;
 }
 
 /** True while another live nowall process supervises this repo. */

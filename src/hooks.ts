@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import {
   constants,
   chmodSync,
@@ -9,13 +8,15 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { accountFromEnv } from "./accounts.js";
 import { lastLimitFromTranscript } from "./adapters/claude.js";
 import { CURSOR_EVENTS } from "./adapters/others.js";
 import { appendSafe, readTail, shq, writeAtomic } from "./fsafe.js";
 import { checkpoint, excludeLocally, findRepoRoot, repoRoot } from "./git.js";
+import { takeoverBlocked } from "./pause.js";
+import { spawn, spawnSync } from "./proc.js";
 import { JOURNAL_RULE } from "./prompt.js";
 import { redact, redactDeep } from "./redact.js";
 import type { AccountId, AgentId, LimitHit } from "./schemas.js";
@@ -44,6 +45,7 @@ import {
 } from "./state.js";
 import {
   type ChildStatus,
+  type SessionOrigin,
   describeChildren,
   describeTool,
   liveChildren,
@@ -126,6 +128,43 @@ export function ensureExternalSession(root: string, sid: string, agent: AgentId,
   });
 }
 
+/** Controlling terminal of a process, e.g. "/dev/ttys004", or undefined. */
+function ttyOf(pid: number): string | undefined {
+  if (process.platform === "win32") return undefined;
+  const r = spawnSync("/bin/ps", ["-o", "tty=", "-p", String(pid)], {
+    encoding: "utf8",
+    timeout: 1000,
+  });
+  const tty = (r.stdout ?? "").trim();
+  return /^ttys?\d+$/.test(tty) ? `/dev/${tty}` : undefined;
+}
+
+/**
+ * Where this session lives, read from the environment the agent gave its hook. The agent is our
+ * parent process, so its terminal is what a click should bring forward.
+ */
+export function sessionOrigin(
+  agent: AgentId,
+  env: NodeJS.ProcessEnv,
+  tty: (pid: number) => string | undefined = ttyOf,
+  parent = process.ppid,
+): SessionOrigin {
+  const bundle = env.__CFBundleIdentifier;
+  if (env.CLAUDE_CODE_ENTRYPOINT === "claude-desktop") {
+    return { kind: "claude-desktop", bundle: "com.anthropic.claudefordesktop" };
+  }
+  const found = tty(parent);
+  if (found || env.TERM_PROGRAM) {
+    const out: SessionOrigin = { kind: "terminal" };
+    if (env.TERM_PROGRAM) out.term = env.TERM_PROGRAM;
+    if (bundle) out.bundle = bundle;
+    if (found) out.tty = found;
+    return out;
+  }
+  if (agent === "cursor") return { kind: "cursor-ide", ...(bundle ? { bundle } : {}) };
+  return { kind: "terminal", ...(bundle ? { bundle } : {}) };
+}
+
 const HOT = new Set([
   "prompt",
   "post-tool",
@@ -195,27 +234,43 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
   const cwd = hookCwd(input, env);
   // Frequent hooks run on every tool call or turn: no git process on that path.
   const root = trustedRoot(cwd, !HOT.has(name));
-  if (!root) return "";
-  const sid = hookSid(input, env, loadSession(root)?.sid);
+  // A chat outside a git repo (the desktop app's scratch folders) still gets a bubble. Without a
+  // repo there's nothing to journal, snapshot or hand off, so those steps are skipped below.
+  const where = root ?? realish(cwd);
+  const sid = hookSid(input, env, root ? loadSession(root)?.sid : undefined);
   const account = accountFromEnv(agent, env);
-  const rel = (p: string) => (isAbsolute(p) ? relative(root, realish(p)) : p);
+  const rel = (p: string) => (isAbsolute(p) ? relative(where, realish(p)) : p);
+  const journal = (line: Parameters<typeof appendJournal>[1]) => {
+    if (!root) return;
+    try {
+      appendJournal(root, line);
+    } catch {
+      // the journal helps a later handoff; it never gets to cost the agent its status
+    }
+  };
   // Cursor hooks answer in Cursor's own output shapes; Claude's prompt hook would treat any
   // stdout as extra context, so it must stay silent.
   const cursor = agent === "cursor";
   // A Cursor subagent is its own conversation: find the chat that spawned it, if any.
-  const link = cursor ? linkCursorChild(sid, root, name, now) : undefined;
+  const link = cursor ? linkCursorChild(sid, where, name, now) : undefined;
   const parentSid = link?.parentSid;
   // Claude runs hooks inside subagents under the parent's session_id, tagged with agent_id.
   const childId = !cursor ? cleanId(input.agent_id) : "";
   const ts = now.toISOString();
+  const known = readStatus(sid);
   const status = (patch: Omit<Parameters<typeof updateStatus>[2], "agent">) =>
     updateStatus(
       sid,
-      root,
+      where,
       {
         agent,
         ...(account !== agent ? { account } : {}),
         ...(parentSid ? { parentSid } : {}),
+        // A chat you came back to after a takeover lives where it did, not in the takeover's log.
+        ...(known?.origin && (known.origin.kind !== "takeover" || env.NOWALL_SID)
+          ? {}
+          : { origin: sessionOrigin(agent, env) }),
+        ...(root ? {} : { noRepo: true }),
         ...patch,
       },
       now,
@@ -237,12 +292,14 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
 
   switch (name) {
     case "session-start":
+      // Status first: the bubble appears now, however long the snapshot below takes.
+      status({ phase: "idle", detail: "Session started" });
+      touch();
+      if (root) keepHandoffLocal(root);
       // Synchronous on purpose: the base must predate the agent's first edit, or that work would
       // look like it was already there. Fast thanks to the persistent snapshot index.
       // A subagent's conversation never takes over session.json from the chat that spawned it.
-      if (!env.NOWALL_SID && !parentSid) ensureExternalSession(root, sid, agent, now);
-      status({ phase: "idle", detail: "Session started" });
-      touch();
+      if (root && !env.NOWALL_SID && !parentSid) ensureExternalSession(root, sid, agent, now);
       if (cursor) return JSON.stringify({ additional_context: JOURNAL_RULE });
       return JSON.stringify({
         hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: JOURNAL_RULE },
@@ -251,10 +308,10 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
     case "prompt": {
       const prompt = typeof input.prompt === "string" ? input.prompt : "";
       if (prompt.trim() && !prompt.trim().startsWith("/")) {
-        if (!isDuplicatePrompt(root, sid, prompt, now))
-          appendJournal(root, { ts, sid, agent, kind: "goal", text: prompt });
         status({ phase: "working", detail: prompt, turnEnded: false });
         touch(prompt);
+        if (root && !isDuplicatePrompt(root, sid, prompt, now))
+          journal({ ts, sid, agent, kind: "goal", text: prompt });
       }
       return cursor ? JSON.stringify({ continue: true }) : "";
     }
@@ -272,17 +329,17 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
       );
       if (EDIT_TOOLS.test(tool) || (file && !SHELL_TOOLS.test(tool))) {
         const f = file ? rel(file) : undefined;
-        appendJournal(root, { ts, sid, agent, kind: "edit", text: tool, files: f ? [f] : [] });
         const detail = describeTool(tool, f);
         status({ phase: "working", detail: mark(detail), ...seen() });
         touch(detail);
+        journal({ ts, sid, agent, kind: "edit", text: tool, files: f ? [f] : [] });
       } else if (SHELL_TOOLS.test(tool)) {
         const cmd = ti.command ?? input.command;
         const text = Array.isArray(cmd) ? cmd.join(" ") : String(cmd ?? "");
-        if (text) appendJournal(root, { ts, sid, agent, kind: "cmd", text: text.slice(0, 120) });
         const detail = describeTool(tool, undefined, text);
         status({ phase: "working", detail: mark(detail), ...seen() });
         touch(detail);
+        if (text) journal({ ts, sid, agent, kind: "cmd", text: text.slice(0, 120) });
       }
       return "";
     }
@@ -335,7 +392,7 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
       if (cursor) {
         // Remember the child so its own conversation can be tied back to this chat.
         const map = readChildrenMap();
-        map[id] = { parentSid: parent, repo: root, startedAt: ts, ...(type ? { type } : {}) };
+        map[id] = { parentSid: parent, repo: where, startedAt: ts, ...(type ? { type } : {}) };
         writeChildrenMap(map);
       }
       const prev = readStatus(parent);
@@ -343,7 +400,7 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
       children.push({ id, startedAt: ts, ...(type ? { type } : {}) });
       updateStatus(
         parent,
-        root,
+        where,
         {
           agent: prev?.agent ?? agent,
           ...(!prev && account !== agent ? { account } : {}),
@@ -389,7 +446,17 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
         finishChild(link.parentSid, { id: link.childId }, now);
         return "";
       }
-      status({ phase: "ended", detail: "Session closed", children: [] });
+      // The desktop app closes its process soon after a turn ends. That isn't news: a finished
+      // chat keeps its check mark until you've looked at it.
+      // If you closed the chat yourself, it's simply closed.
+      if (
+        (known?.phase === "your-turn" || known?.phase === "needs-input") &&
+        (input.reason === undefined || input.reason === "other")
+      ) {
+        status({ children: [] });
+      } else {
+        status({ phase: "ended", detail: "Session closed", children: [] });
+      }
       forgetChildrenOf(sid);
       return "";
 
@@ -401,7 +468,16 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
         message: "usage limit reached",
       };
       saveState(recordLimit(loadState(), account, hit, now, loadConfig().defaultCooldownMinutes));
-      appendJournal(root, { ts, sid, agent, kind: "limit", text: hit.message });
+      journal({ ts, sid, agent, kind: "limit", text: hit.message });
+      if (!root) {
+        status({ phase: "stopped", detail: `${hit.message}. Not a git repo, so no takeover` });
+        return "";
+      }
+      const blocked = env.NOWALL_SID ? null : takeoverBlocked(root, now);
+      if (blocked) {
+        status({ phase: "stopped", detail: `${hit.message}. ${blocked}` });
+        return "";
+      }
       status({ phase: "handing-off", detail: hit.message });
 
       if (env.NOWALL_SID) {
@@ -424,6 +500,33 @@ function dispatch(name: string, agent: AgentId, input: Json, env: NodeJS.Process
     }
     default:
       return "";
+  }
+}
+
+/**
+ * Inside iCloud Drive (a synced Documents or Desktop folder), .handoff/ gets evicted like everything
+ * else, and then every hook stalls on it. This marks the folder local-only and brings back anything
+ * already gone. Runs once per session and never blocks it.
+ */
+function keepHandoffLocal(root: string): void {
+  if (process.platform !== "darwin" || !/\/(Documents|Desktop|Mobile Documents)\//.test(`${root}/`))
+    return;
+  try {
+    const dir = handoffDir(root);
+    const child = spawn(
+      "/bin/sh",
+      [
+        "-c",
+        'xattr -w com.apple.fileprovider.ignore#P 1 "$1" 2>/dev/null; brctl download "$1" 2>/dev/null',
+        "sh",
+        dir,
+      ],
+      { detached: true, stdio: "ignore" },
+    );
+    child.on("error", () => {});
+    child.unref();
+  } catch {
+    // only an optimisation
   }
 }
 
@@ -635,7 +738,7 @@ export function launchTakeover(
   const cli = join(dirname(fileURLToPath(import.meta.url)), "cli.js");
   const config = loadConfig();
   // Agent CLIs usually live on the user's shell PATH, which GUI apps (and their hooks) don't get.
-  const path = [config.path, env.PATH].filter(Boolean).join(":");
+  const path = [config.path, env.PATH].filter(Boolean).join(delimiter);
 
   if (config.takeover !== "terminal" || process.platform !== "darwin") {
     const log = join(handoffDir(root), "takeover.log");

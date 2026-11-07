@@ -30,7 +30,7 @@ export function writeJson(path: string, value: unknown): void {
 
 function realRoot(root: string): string {
   try {
-    return realpathSync(root);
+    return process.platform === "win32" ? realpathSync.native(root) : realpathSync(root);
   } catch {
     return root;
   }

@@ -320,6 +320,37 @@ describe("end-to-end failover with fake agents", { timeout: 60_000 }, () => {
     expect(calls(w).filter((c) => c.name === "codex")).toHaveLength(2);
   });
 
+  it("stops a turn when asked to, and keeps what was done", async () => {
+    const w = world({ claude: [CLAUDE_LIMITED], codex: [{ sleepMs: 60_000 }] });
+    const child = spawn(process.execPath, [CLI, "run", "claude"], { cwd: w.repo, env: w.env });
+    let out = "";
+    child.stdout.on("data", (d) => {
+      out += d;
+    });
+    const started = Date.now();
+    while (!out.includes("continuing in Codex") && Date.now() - started < 20_000) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    await new Promise((r) => setTimeout(r, 500));
+    child.kill("SIGINT");
+    await new Promise((r) => child.on("close", r));
+    expect(out).toContain("Stopped by you.");
+    expect(out).toContain("(stopped by you)");
+    expect(out).not.toContain("(finished)");
+    expect(Date.now() - started).toBeLessThan(40_000);
+  });
+
+  it("stops a turn that runs past the time limit", () => {
+    const w = world(
+      { claude: [CLAUDE_LIMITED], codex: [{ sleepMs: 60_000 }] },
+      { stop: { maxTurns: 10, maxMinutes: 0.05, noDiffTurns: 2 } },
+    );
+    const started = Date.now();
+    const r = run(w);
+    expect(r.stdout).toContain("Stopped: reached the time limit.");
+    expect(Date.now() - started).toBeLessThan(40_000);
+  });
+
   it("pauses with the earliest reset when every agent is limited", () => {
     const w = world(
       {

@@ -90,6 +90,9 @@ describe("buildPacket + masterPrompt", () => {
     expect(prompt).toContain("Claude Code was working on it");
     expect(prompt).toContain('"updatedBy":"codex"');
     expect(prompt).toContain("nowall note --task");
+    // An edit-only takeover can't run commands, and must not spend usage hunting for a way around that.
+    expect(prompt).toContain("If a command is rejected, this session only allows edits");
+    expect(prompt).toContain("don't retry it or look for a way around it");
   });
 
   it("reconciles the existing tasks.json into hints", () => {

@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, rmdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { createInterface } from "node:readline/promises";
-import { isOurs, mergeHooksFile, withHooks } from "./adapters/common.js";
+import { isOurs, mergeHooksFile, nowallInvocation, withHooks } from "./adapters/common.js";
 import { ADAPTERS, resolveBinary } from "./adapters/index.js";
 import { defaultRunner } from "./adapters/types.js";
-import { readJsonSafe, shq, writeAtomic } from "./fsafe.js";
+import { claudeDesktopInstalled } from "./agents.js";
+import { readJsonSafe, writeAtomic } from "./fsafe.js";
 import { excludeLocally, repoRoot, snapshotTree } from "./git.js";
 import { AGENT_IDS, type Config } from "./schemas.js";
 import { handoffDir, handoffProblem } from "./session.js";
@@ -57,10 +58,9 @@ async function ask(question: string): Promise<string> {
 }
 
 function nowallCommand(): { cmd: string; global: boolean } {
-  if (resolveBinary("nowall")) return { cmd: "nowall", global: true };
-  // Hooks run through sh: quote paths so spaces, quotes or `$` in them can't inject commands.
-  const script = realpathSync(process.argv[1] ?? "");
-  return { cmd: `${shq(process.execPath)} ${shq(script)}`, global: false };
+  const global = Boolean(resolveBinary("nowall"));
+  // Hooks run through a shell: the paths are quoted so nothing in them can inject commands.
+  return { cmd: nowallInvocation(global, () => realpathSync(process.argv[1] ?? "")), global };
 }
 
 export async function runInit(argv: string[]): Promise<number> {
@@ -96,7 +96,7 @@ export async function runInit(argv: string[]): Promise<number> {
       ? await a.detect(defaultRunner, bin)
       : { installed: false, signedIn: false as const };
     let line: string;
-    if (!d.installed && id === "claude" && existsSync("/Applications/Claude.app")) {
+    if (!d.installed && id === "claude" && claudeDesktopInstalled()) {
       line = `desktop app found (no \`claude\` terminal command). Desktop sessions are covered: a limit opens a Terminal and continues. For in-terminal use: ${a.installHint}`;
     } else if (!d.installed) line = `not installed. Install: ${a.installHint}`;
     else if (d.signedIn === false) line = `installed, not signed in. Run: ${a.loginHint}`;
@@ -128,7 +128,7 @@ export async function runInit(argv: string[]): Promise<number> {
     written.push(...(ADAPTERS[id].installHooks?.(root, cmd) ?? []));
   }
   process.stdout.write(
-    `\nInstalled hooks: ${written.map((w) => w.replace(`${root}/`, "")).join(", ")}\n`,
+    `\nInstalled hooks: ${written.map((w) => w.replace(`${root}${sep}`, "")).join(", ")}\n`,
   );
 
   // Config (+ opt-in fallback)
@@ -164,7 +164,11 @@ export async function runInit(argv: string[]): Promise<number> {
   const wantAlias =
     argv.includes("--alias") ||
     (!yes && (await ask("\nRoute `claude` through nowall in your shell? [y/N] ")) === "y");
-  if (wantAlias) {
+  if (wantAlias && process.platform === "win32") {
+    process.stdout.write(
+      "\nThe `claude` shortcut isn't available on Windows yet. Start sessions with: nowall run claude\n",
+    );
+  } else if (wantAlias) {
     if (!global) {
       process.stdout.write(
         "Skipped: install nowall globally first (npm i -g nowall), then rerun `nowall init --alias`.\n",

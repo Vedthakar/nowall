@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
   copyFileSync,
@@ -11,6 +10,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { execFileSync } from "./proc.js";
+import { isWindows } from "./proc.js";
 
 function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
   return execFileSync("git", args, {
@@ -31,7 +32,21 @@ function tryGit(cwd: string, args: string[]): string | null {
 }
 
 export function repoRoot(cwd: string): string | null {
-  return tryGit(cwd, ["rev-parse", "--show-toplevel"]);
+  const root = tryGit(cwd, ["rev-parse", "--show-toplevel"]);
+  return root && canonicalPath(root);
+}
+
+/**
+ * One spelling for a path on Windows, where git says `C:/Repo`, Node says `C:\\Repo`, and a hook may
+ * say `c:\\repo`. Repos are compared by path, so they would otherwise look untrusted or unknown.
+ */
+export function canonicalPath(path: string): string {
+  if (!isWindows) return path;
+  try {
+    return realpathSync.native(resolve(path));
+  } catch {
+    return resolve(path);
+  }
 }
 
 /**
@@ -41,7 +56,7 @@ export function repoRoot(cwd: string): string | null {
 export function findRepoRoot(cwd: string): string | null {
   let dir: string;
   try {
-    dir = realpathSync(cwd);
+    dir = canonicalPath(realpathSync(cwd));
   } catch {
     return null;
   }
