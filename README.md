@@ -131,6 +131,8 @@ Windows support is new. The CLI, hooks, failover, multiple accounts, undo and un
 
 ### The tray app
 
+<img src="docs/images/tray-panel.png" alt="The nowall tray panel on Windows, listing three sessions with Switch and Cancel switch buttons, then each account's usage" width="350">
+
 `nowall setup` puts an icon in your system tray, next to the clock. Windows may tuck it behind the ^ arrow; drag it out to keep it in view. Its dot shows the most urgent thing going on:
 
 | Dot | Meaning |
